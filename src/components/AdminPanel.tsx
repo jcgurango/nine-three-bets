@@ -247,6 +247,11 @@ function AdminMatch({ match }: { match: Match }) {
               </>
             )}
           </span>
+          {match.scrapedAt != null && (
+            <span className="text-xs text-mute">
+              Scraped odds last received <LocalTime ts={match.scrapedAt} />
+            </span>
+          )}
         </div>
         {editing ? (
           <MatchForm match={match} submitLabel="Save" onDone={() => setEditing(false)} />
@@ -311,29 +316,36 @@ function AdminGroup({
 }) {
   const isMap = mapNumber > 0;
   const savedName = match.mapNames[mapNumber - 1] ?? "";
-  const [name, setName] = useState(savedName);
-  // Odds as typed, by market id then outcome key.
-  const [odds, setOdds] = useState<Record<number, Record<string, string>>>(() =>
-    Object.fromEntries(
-      markets.map((m) => [m.id, Object.fromEntries(m.outcomes.map((o) => [o.key, oddsField(o.odds)]))]),
-    ),
-  );
+  // Only what the admin has typed and not yet saved is kept here. Every other
+  // field shows the saved value, so odds arriving from the scraper appear live
+  // and are never overwritten by a stale copy from when the page loaded.
+  const [nameEdit, setNameEdit] = useState<string | null>(null);
+  const [edits, setEdits] = useState<Record<string, string>>({});
   const { pending, error, run } = useRun();
 
+  const name = nameEdit ?? savedName;
+  const shown = (m: Market, key: string, saved: number | null) =>
+    edits[`${m.id}:${key}`] ?? oddsField(saved);
   const dirty =
     name !== savedName ||
-    markets.some((m) => m.outcomes.some((o) => parseOdds(odds[m.id][o.key]) !== o.odds));
+    markets.some((m) => m.outcomes.some((o) => parseOdds(shown(m, o.key, o.odds)) !== o.odds));
 
-  const save = () =>
-    saveOddsAction({
+  const save = async () => {
+    const res = await saveOddsAction({
       matchId: match.id,
       mapNumber,
       mapName: name,
       odds: markets.map((m) => ({
         marketId: m.id,
-        odds: Object.fromEntries(m.outcomes.map((o) => [o.key, parseOdds(odds[m.id][o.key])])),
+        odds: Object.fromEntries(m.outcomes.map((o) => [o.key, parseOdds(shown(m, o.key, o.odds))])),
       })),
     });
+    if (res.ok) {
+      setEdits({});
+      setNameEdit(null);
+    }
+    return res;
+  };
 
   /** Run a status change, saving any unsaved odds first so they aren't lost or ignored. */
   const act = (fn: () => Promise<Result>) =>
@@ -346,7 +358,7 @@ function AdminGroup({
     });
 
   const setOne = (id: number, key: string, value: string) =>
-    setOdds((o) => ({ ...o, [id]: { ...o[id], [key]: value } }));
+    setEdits((e) => ({ ...e, [`${id}:${key}`]: value }));
 
   return (
     <div className="border-b border-line p-4 last:border-b-0">
@@ -360,7 +372,7 @@ function AdminGroup({
             placeholder="Map name"
             aria-label={`Map ${mapNumber} name`}
             value={name}
-            onChange={(e) => setName(e.target.value)}
+            onChange={(e) => setNameEdit(e.target.value)}
           />
         )}
         <button
@@ -433,7 +445,7 @@ function AdminGroup({
                           placeholder="odds"
                           disabled={locked}
                           className={`${input} w-20 font-mono disabled:opacity-50`}
-                          value={odds[m.id][o.key]}
+                          value={shown(m, o.key, o.odds)}
                           onChange={(e) => setOne(m.id, o.key, e.target.value)}
                         />
                       </label>

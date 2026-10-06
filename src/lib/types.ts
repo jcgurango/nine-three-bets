@@ -75,6 +75,8 @@ export interface Match {
   startsAt: number | null;
   archived: boolean;
   mapNames: string[];
+  /** When odds for this match last arrived from the scraper (unix seconds), if ever. */
+  scrapedAt: number | null;
   markets: Market[];
 }
 

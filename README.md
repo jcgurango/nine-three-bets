@@ -68,6 +68,61 @@ backup.
    every stake, for example on a map 3 that is never played. Both can be undone.
 6. **Archive** the match to take it off the home page.
 
+## Scraped odds (`POST /ingest`)
+
+Instead of typing odds in, a scraper can post them. The request must carry the
+session cookie of a logged-in admin, and the body is one scraped match (or an
+array of them):
+
+```json
+{
+  "scrapedAt": "2026-10-06T20:44:43.135Z",
+  "matchId": "5:a55be1bd-4c78-4630-83d9-16c81d2adcb6",
+  "tournament": "VALORANT Champions 2026",
+  "teams": ["100 Thieves", "G2 Esports"],
+  "markets": {
+    "Winner": { "100 Thieves": 1.51, "G2 Esports": 2.46 },
+    "Map 1 - Winner (incl. overtime)": { "100 Thieves": 1.6, "G2 Esports": 2.24 },
+    "Correct map score": { "2:0": 2.58, "2:1": 3.2, "0:2": 4.72, "1:2": 4.27 },
+    "Map 1 - Pistol round winner": {
+      "100 Thieves 1st": 1.79, "100 Thieves 2nd": 1.79,
+      "G2 Esports 1st": 1.96, "G2 Esports 2nd": 1.96
+    }
+  }
+}
+```
+
+**Which match.** A match is recognised by `matchId` once it has been seen. The
+first time, it is matched to an active match by team names, in either order;
+"G2" matches "G2 Esports" and "100T" matches "100 Thieves", but abbreviations
+like "FNC" for "Fnatic" do not. If nothing fits, a new match is created from
+the scraped teams and tournament, with its length taken from the scores on
+offer and every market left in draft.
+
+**Which market.** Titles are matched loosely (case, dashes and bracketed notes
+are ignored):
+
+| Scraped title | Goes to |
+| --- | --- |
+| `Winner`, `Match winner` | Match winner |
+| `Map N - Winner ...` | Map N: map winner |
+| `Correct map score`, `Correct score` | Correct score. Scores are read as first team : second team. |
+| `Map N - Pistol round winner` with outcomes `<team> 1st` / `<team> 2nd` | Map N: 1st pistol and 2nd pistol |
+| `Map N - 1st pistol ...`, `Map N - 2nd pistol ...` | Map N: that pistol round |
+
+Anything else is skipped, as is a market missing an outcome, one that doesn't
+fit the match (map 4 of a best of 3), or one already paid out or voided. The
+response lists what was applied and what was skipped, with the reason.
+
+Ingesting only sets the provided odds: it never opens, closes or pays out a
+market, and it overwrites odds typed in by hand. A scrape older than the last
+one applied to the match is rejected.
+
+The session cookie is `SameSite=Lax`, so the request has to come from something
+that sends it: a page on this site, a browser extension with permission for
+this site, or a script that passes the cookie itself. A `fetch` run inside the
+bookmaker's page will arrive without it and get a 401.
+
 ## Live results
 
 Each logged-in browser holds a server-sent events connection to `/api/events`.

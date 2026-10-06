@@ -83,16 +83,30 @@ async function init(): Promise<Client> {
   const client = createClient({ url, authToken: process.env.DATABASE_AUTH_TOKEN });
   if (isFile) await client.execute("PRAGMA journal_mode = WAL");
   await client.executeMultiple(SCHEMA);
-  // Added after the first version: the public name a player picks for themselves.
-  const cols = await client.execute("PRAGMA table_info(users)");
-  if (!cols.rows.some((r) => r.name === "nickname")) {
-    await client.execute("ALTER TABLE users ADD COLUMN nickname TEXT");
-  }
+  // Columns added after the first version.
+  // The public name a player picks for themselves.
+  await addColumn(client, "users", "nickname", "TEXT");
   await client.execute(
     "CREATE UNIQUE INDEX IF NOT EXISTS users_nickname ON users(nickname COLLATE NOCASE)",
   );
+  // Link to the match on the site odds are scraped from (see /ingest): its id
+  // there, whether that site lists the two teams in the opposite order to us,
+  // and when its odds were last scraped (unix ms).
+  await addColumn(client, "matches", "external_id", "TEXT");
+  await addColumn(client, "matches", "external_flipped", "INTEGER NOT NULL DEFAULT 0");
+  await addColumn(client, "matches", "scraped_at", "INTEGER");
+  await client.execute(
+    "CREATE UNIQUE INDEX IF NOT EXISTS matches_external_id ON matches(external_id)",
+  );
   await migrateToV2(client);
   return client;
+}
+
+async function addColumn(client: Client, table: string, column: string, type: string) {
+  const cols = await client.execute(`PRAGMA table_info(${table})`);
+  if (!cols.rows.some((r) => r.name === column)) {
+    await client.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+  }
 }
 
 /**

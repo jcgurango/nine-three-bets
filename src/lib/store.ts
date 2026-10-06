@@ -1,8 +1,10 @@
 import type { Row, Transaction } from "@libsql/client";
 import { getDb, writeTx, STARTING_BALANCE } from "./db";
+import { UserError } from "./errors";
 import { wakeEventStreams } from "./live";
 import { quote } from "./odds";
-import { TEAM_OUTCOMES, matchLevelMarkets, outcomeLabel } from "./outcomes";
+import { TEAM_OUTCOMES, marketLabel, matchLevelMarkets, outcomeLabel } from "./outcomes";
+import { flipOdds, sameTeam, type ParsedScrape, type Skipped } from "./scrape";
 import {
   MAP_KINDS,
   type BetStatus,
@@ -18,8 +20,7 @@ import {
   type User,
 } from "./types";
 
-/** An error whose message is safe to show to the user. */
-export class UserError extends Error {}
+export { UserError };
 
 /** Reject a bet if the price got more than this much worse than what the user saw. */
 const SLIPPAGE_TOLERANCE = 0.03;
@@ -169,6 +170,7 @@ export async function listMatches(archived: boolean): Promise<Match[]> {
     startsAt: r.starts_at == null ? null : Number(r.starts_at),
     archived: Number(r.archived) === 1,
     mapNames: parseMapNames(r.map_names),
+    scrapedAt: r.scraped_at == null ? null : Math.floor(Number(r.scraped_at) / 1000),
     markets: marketsByMatch.get(Number(r.id)) ?? [],
   }));
 }
@@ -199,28 +201,31 @@ async function insertMarket(
   }
 }
 
-export async function createMatch(input: MatchInput & { bestOf: number }): Promise<void> {
-  await writeTx(async (tx) => {
-    const rs = await tx.execute({
-      sql: `INSERT INTO matches (label, team_a, team_b, best_of, starts_at, map_names)
-            VALUES (?, ?, ?, ?, ?, ?)`,
-      args: [
-        input.label,
-        input.teamA,
-        input.teamB,
-        input.bestOf,
-        input.startsAt,
-        JSON.stringify(Array(input.bestOf).fill("")),
-      ],
-    });
-    const matchId = Number(rs.lastInsertRowid);
-    for (const [kind, keys] of matchLevelMarkets(input.bestOf)) {
-      await insertMarket(tx, matchId, 0, kind, keys);
-    }
-    for (let map = 1; map <= input.bestOf; map++) {
-      for (const kind of MAP_KINDS) await insertMarket(tx, matchId, map, kind, TEAM_OUTCOMES);
-    }
+async function insertMatch(tx: Transaction, input: MatchInput & { bestOf: number }): Promise<number> {
+  const rs = await tx.execute({
+    sql: `INSERT INTO matches (label, team_a, team_b, best_of, starts_at, map_names)
+          VALUES (?, ?, ?, ?, ?, ?)`,
+    args: [
+      input.label,
+      input.teamA,
+      input.teamB,
+      input.bestOf,
+      input.startsAt,
+      JSON.stringify(Array(input.bestOf).fill("")),
+    ],
   });
+  const matchId = Number(rs.lastInsertRowid);
+  for (const [kind, keys] of matchLevelMarkets(input.bestOf)) {
+    await insertMarket(tx, matchId, 0, kind, keys);
+  }
+  for (let map = 1; map <= input.bestOf; map++) {
+    for (const kind of MAP_KINDS) await insertMarket(tx, matchId, map, kind, TEAM_OUTCOMES);
+  }
+  return matchId;
+}
+
+export async function createMatch(input: MatchInput & { bestOf: number }): Promise<void> {
+  await writeTx((tx) => insertMatch(tx, input));
 }
 
 export async function updateMatch(id: number, input: MatchInput): Promise<void> {
@@ -491,6 +496,134 @@ export async function unsettleMarket(marketId: number): Promise<void> {
     });
   });
   wakeEventStreams();
+}
+
+// ---------------------------------------------------------------- scraped odds
+
+export interface IngestResult {
+  match: {
+    id: number;
+    teamA: string;
+    teamB: string;
+    /** No existing match fitted, so a new one was created (with every market in draft). */
+    created: boolean;
+  };
+  /** Our markets whose provided odds were updated, with the odds by outcome name. */
+  applied: { title: string; market: string; odds: Record<string, number> }[];
+  /** Scraped markets that were not used, and why. */
+  skipped: Skipped[];
+}
+
+/**
+ * Apply a parsed scrape: find the match it belongs to (creating it if there
+ * is none), then set the provided odds on each market it has prices for.
+ * Markets are never opened, closed or paid out from here.
+ *
+ * The match is found by the scraped site's id if we've seen it before,
+ * otherwise by team names among the active matches, in either order.
+ */
+export async function ingestScrape(scrape: ParsedScrape): Promise<IngestResult> {
+  return writeTx(async (tx) => {
+    let row: Row | undefined;
+    let flipped = false;
+    let created = false;
+
+    if (scrape.externalId) {
+      const rs = await tx.execute({
+        sql: "SELECT * FROM matches WHERE external_id = ?",
+        args: [scrape.externalId],
+      });
+      row = rs.rows[0];
+      if (row) flipped = Number(row.external_flipped) === 1;
+    }
+    if (!row) {
+      const rs = await tx.execute(
+        `SELECT * FROM matches WHERE archived = 0 AND external_id IS NULL
+         ORDER BY starts_at IS NULL, starts_at, id`,
+      );
+      for (const r of rs.rows) {
+        const [a, b] = [String(r.team_a), String(r.team_b)];
+        const straight = sameTeam(a, scrape.teams[0]) && sameTeam(b, scrape.teams[1]);
+        const reversed = sameTeam(a, scrape.teams[1]) && sameTeam(b, scrape.teams[0]);
+        if (straight === reversed) continue;
+        row = r;
+        flipped = reversed;
+        break;
+      }
+    }
+    if (!row) {
+      const id = await insertMatch(tx, {
+        label: scrape.tournament,
+        teamA: scrape.teams[0],
+        teamB: scrape.teams[1],
+        bestOf: scrape.bestOf,
+        startsAt: null,
+      });
+      row = (await tx.execute({ sql: "SELECT * FROM matches WHERE id = ?", args: [id] })).rows[0];
+      created = true;
+    }
+
+    const matchId = Number(row.id);
+    const result: IngestResult = {
+      match: { id: matchId, teamA: String(row.team_a), teamB: String(row.team_b), created },
+      applied: [],
+      skipped: [...scrape.skipped],
+    };
+    if (row.scraped_at != null && Number(row.scraped_at) > scrape.scrapedAt) {
+      throw new UserError("Ignored: newer odds for this match have already been ingested.");
+    }
+
+    const mapNames = parseMapNames(row.map_names);
+    for (const market of scrape.markets) {
+      const skip = (reason: string) => result.skipped.push({ title: market.title, reason });
+      const odds = flipped ? flipOdds(market.odds) : market.odds;
+      const mr = await tx.execute({
+        sql: "SELECT id, status FROM markets_v2 WHERE match_id = ? AND map_number = ? AND kind = ?",
+        args: [matchId, market.mapNumber, market.kind],
+      });
+      const target = mr.rows[0];
+      if (!target) {
+        skip(`this best of ${row.best_of} has no such market`);
+        continue;
+      }
+      if (target.status === "settled" || target.status === "void") {
+        skip(target.status === "settled" ? "already paid out" : "voided");
+        continue;
+      }
+      const keys = (
+        await tx.execute({
+          sql: "SELECT key FROM outcomes WHERE market_id = ? ORDER BY position",
+          args: [target.id],
+        })
+      ).rows.map((r) => String(r.key));
+      if (keys.length !== Object.keys(odds).length || keys.some((k) => !(k in odds))) {
+        skip(`outcomes don't match this best of ${row.best_of} (expected ${keys.join(", ")})`);
+        continue;
+      }
+      for (const key of keys) {
+        await tx.execute({
+          sql: "UPDATE outcomes SET odds = ? WHERE market_id = ? AND key = ?",
+          args: [odds[key], target.id, key],
+        });
+      }
+      result.applied.push({
+        title: market.title,
+        market: marketLabel(market.kind, market.mapNumber, mapNames[market.mapNumber - 1] ?? ""),
+        odds: Object.fromEntries(
+          keys.map((k) => [outcomeLabel(k, result.match.teamA, result.match.teamB), odds[k]]),
+        ),
+      });
+    }
+
+    await tx.execute({
+      sql: `UPDATE matches SET scraped_at = ?,
+              external_id = COALESCE(external_id, ?),
+              external_flipped = CASE WHEN external_id IS NULL THEN ? ELSE external_flipped END
+            WHERE id = ?`,
+      args: [scrape.scrapedAt, scrape.externalId, flipped ? 1 : 0, matchId],
+    });
+    return result;
+  });
 }
 
 // ---------------------------------------------------------------- bets
