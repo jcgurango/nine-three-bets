@@ -1,0 +1,320 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-ink: #0f1923;
+  --color-panel: #162330;
+  --color-raised: #1d2d3c;
+  --color-line: #2a3b4b;
+  --color-bone: #ece8e1;
+  --color-mute: #8a98a6;
+  --color-val: #ff4655;
+  --color-teal: #2bd4b4;
+  --color-gold: #f5c04a;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-display);
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-ink);
+  color: var(--color-bone);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* public/credits.svg used as a mask so the icon inherits the text colour. */
+.credit-icon {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-right: 0.3em;
+  vertical-align: -0.05em;
+  background-color: currentColor;
+  -webkit-mask: url("/credits.svg") center / contain no-repeat;
+  mask: url("/credits.svg") center / contain no-repeat;
+}
+
+/* ---------------------------------------------------------------- balance */
+
+.balance-float {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  font-size: 1rem;
+  font-weight: 800;
+  white-space: nowrap;
+  text-shadow: 0 2px 8px rgb(0 0 0 / 0.7);
+  pointer-events: none;
+  animation: balance-float 2.4s ease-out forwards;
+}
+@keyframes balance-float {
+  0% { transform: translateY(26px) scale(0.6); opacity: 0; }
+  12% { transform: translateY(8px) scale(1.25); opacity: 1; }
+  22% { transform: translateY(8px) scale(1); }
+  70% { transform: translateY(4px); opacity: 1; }
+  100% { transform: translateY(-16px) scale(0.8); opacity: 0; }
+}
+.balance-up { animation: balance-up 1.1s ease-out; }
+@keyframes balance-up {
+  0% { transform: scale(1); }
+  25% { transform: scale(1.3); background: var(--color-gold); color: var(--color-ink); box-shadow: 0 0 28px var(--color-gold); }
+  100% { transform: scale(1); }
+}
+.balance-down { animation: balance-down 0.6s ease-out; }
+@keyframes balance-down {
+  0%, 100% { transform: translateX(0); }
+  15% { transform: translateX(-5px); background: rgb(255 70 85 / 0.45); }
+  35% { transform: translateX(5px); }
+  55% { transform: translateX(-3px); }
+  75% { transform: translateX(2px); }
+}
+
+/* ---------------------------------------------------------------- toasts */
+
+.toast { animation: toast-in 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.2) both; }
+@keyframes toast-in {
+  from { transform: translateX(110%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* ---------------------------------------------------------------- win celebration */
+
+.win-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  overflow: hidden;
+  pointer-events: none;
+  animation: win-overlay 5s linear forwards;
+}
+@keyframes win-overlay {
+  0%, 88% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.win-flash {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle, #fff 0%, var(--color-gold) 35%, transparent 75%);
+  animation: win-flash 0.8s ease-out forwards;
+}
+@keyframes win-flash {
+  from { opacity: 0.85; }
+  to { opacity: 0; }
+}
+
+.win-rays {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 220vmax;
+  height: 220vmax;
+  background: repeating-conic-gradient(rgb(245 192 74 / 0.28) 0deg 7deg, transparent 7deg 18deg);
+  -webkit-mask-image: radial-gradient(circle, #000 0%, transparent 50%);
+  mask-image: radial-gradient(circle, #000 0%, transparent 50%);
+  animation: win-rays 16s linear infinite;
+}
+@keyframes win-rays {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+.win-glow {
+  position: absolute;
+  inset: 0;
+  box-shadow: inset 0 0 140px 20px var(--color-gold);
+  animation: win-glow 0.7s ease-in-out infinite alternate;
+}
+@keyframes win-glow {
+  from { opacity: 0.25; filter: hue-rotate(0deg); }
+  to { opacity: 0.7; filter: hue-rotate(-35deg); }
+}
+
+.win-banner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  text-align: center;
+  animation: win-banner-out 0.5s 4.2s cubic-bezier(0.6, 0, 0.9, 0.4) forwards;
+}
+@keyframes win-banner-out {
+  to { transform: translateX(60vw) skewX(-20deg); opacity: 0; }
+}
+
+.win-word-wrap {
+  position: relative;
+  padding: 0 0.5em;
+  font-size: clamp(4.5rem, 19vw, 14rem);
+  transform: rotate(-4deg);
+}
+.win-bar {
+  position: absolute;
+  inset: 30% -4% 14%;
+  background: var(--color-val);
+  transform: skewX(-14deg) scaleX(0);
+  transform-origin: left;
+  animation: win-bar 0.35s 0.1s cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
+}
+@keyframes win-bar {
+  to { transform: skewX(-14deg) scaleX(1); }
+}
+.win-word {
+  position: relative;
+  font-weight: 700;
+  font-style: italic;
+  line-height: 0.95;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: #fff;
+  text-shadow:
+    0.05em 0.05em 0 var(--color-ink),
+    0 0 0.5em rgb(245 192 74 / 0.9);
+  animation:
+    win-slam 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.3) both,
+    win-throb 0.45s 0.6s ease-in-out infinite alternate;
+}
+@keyframes win-slam {
+  0% { transform: scale(5); opacity: 0; filter: blur(14px); }
+  60% { transform: scale(0.9); opacity: 1; filter: blur(0); }
+  100% { transform: scale(1); }
+}
+@keyframes win-throb {
+  from { scale: 1; }
+  to { scale: 1.06; }
+}
+
+.win-amount {
+  font-size: clamp(2.5rem, 9vw, 6.5rem);
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-gold);
+  text-shadow: 0 0.04em 0 #7a4d00, 0 0 0.6em rgb(245 192 74 / 0.8);
+  animation: win-rise 0.5s 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
+}
+.win-sub {
+  max-width: 90vw;
+  padding: 0.25rem 0.9rem;
+  border-radius: 999px;
+  background: rgb(15 25 35 / 0.85);
+  font-size: clamp(0.9rem, 2.2vw, 1.25rem);
+  font-weight: 600;
+  animation: win-rise 0.5s 0.6s cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
+}
+@keyframes win-rise {
+  from { transform: translateY(60px) scale(0.6); opacity: 0; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+.win-shake { animation: win-shake 0.7s cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+@keyframes win-shake {
+  0%, 100% { transform: translate(0, 0) rotate(0); }
+  10% { transform: translate(-12px, 7px) rotate(-0.7deg); }
+  20% { transform: translate(11px, -8px) rotate(0.6deg); }
+  30% { transform: translate(-9px, -5px) rotate(-0.5deg); }
+  40% { transform: translate(8px, 6px) rotate(0.4deg); }
+  50% { transform: translate(-6px, 4px) rotate(-0.3deg); }
+  60% { transform: translate(5px, -3px) rotate(0.2deg); }
+  70% { transform: translate(-3px, 2px); }
+  80% { transform: translate(2px, -1px); }
+}
+
+/* ---------------------------------------------------------------- loss animation */
+
+.lose-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  overflow: hidden;
+  pointer-events: none;
+  /* Drain the colour out of everything behind it. */
+  -webkit-backdrop-filter: grayscale(1) brightness(0.75);
+  backdrop-filter: grayscale(1) brightness(0.75);
+  background: radial-gradient(circle, transparent 35%, rgb(0 0 0 / 0.5) 100%);
+  animation: lose-overlay 3.7s ease forwards;
+}
+@keyframes lose-overlay {
+  0% { opacity: 0; }
+  8%, 82% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+.lose-banner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.25rem;
+  text-align: center;
+}
+.lose-sign {
+  padding: 0.12em 0.5em 0.18em;
+  border: 0.05em solid #4a535d;
+  background: #1a2026;
+  box-shadow: 0 0.12em 0.5em rgb(0 0 0 / 0.7);
+  font-size: clamp(3.2rem, 14vw, 10rem);
+  /* Hangs from its top-left corner, so each sag swings like a sign losing a nail. */
+  transform-origin: 6% 0%;
+  transition: transform 0.55s cubic-bezier(0.3, 1.7, 0.5, 1);
+}
+.lose-sign-falling { transition: transform 0.9s cubic-bezier(0.6, 0, 0.9, 0.5); }
+.lose-word {
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #b9c2cb;
+  text-shadow: 0.04em 0.04em 0 #000;
+}
+.lose-amount {
+  font-size: 0.42em;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-val);
+}
+.lose-sub {
+  max-width: 90vw;
+  padding: 0.25rem 0.9rem;
+  border-radius: 999px;
+  background: rgb(15 25 35 / 0.9);
+  font-size: clamp(0.9rem, 2.2vw, 1.25rem);
+  font-weight: 600;
+  color: var(--color-mute);
+  transition: opacity 0.4s;
+}
+
+.lose-slump { animation: lose-slump 3.7s ease-in-out; }
+@keyframes lose-slump {
+  0%, 100% { transform: translateY(0) rotate(0); }
+  20%, 75% { transform: translateY(10px) rotate(0.5deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .win-flash, .win-rays, .win-glow, .win-bar { display: none; }
+  .lose-sign, .lose-sign-falling { transition: none; }
+  .lose-slump { animation: none; }
+  .win-word, .win-amount, .win-sub, .win-banner, .toast, .balance-float, .balance-up, .balance-down {
+    animation-duration: 0.01s;
+    animation-iteration-count: 1;
+  }
+}
