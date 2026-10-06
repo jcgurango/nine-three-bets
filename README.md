@@ -1,8 +1,9 @@
 # 9-3 Bets
 
 Play-money betting on Valorant matches. Players log in with Discord, pick a
-nickname, start with 50,000 credits, and bet on the winner of each map and of
-the 1st and 2nd pistol rounds. Next.js (App Router) + SQLite via libSQL.
+nickname, start with 50,000 credits, and bet on the match winner, the correct
+map score, and the winner of each map and of its 1st and 2nd pistol rounds.
+Next.js (App Router) + SQLite via libSQL.
 
 Only nicknames are shown on the site. Discord names are stored but never
 displayed, and players without a nickname don't appear on the leaderboard.
@@ -42,21 +43,29 @@ The local database is the file `data/ninethree.db`. Delete the `data/` folder
 - **Vercel or other serverless hosts**: the filesystem doesn't persist, so point
   `DATABASE_URL` at a hosted libSQL database (Turso).
 
-Tables are created automatically on first start.
+Tables are created automatically on first start, and an older database is
+upgraded in place. The upgrade that added multi-outcome markets copied
+`markets`, `bets` and `events` into `markets_v2` + `outcomes`, `bets_v2` and
+`events_v2`; the original three tables are no longer read and are kept only as a
+backup.
 
 ## Running a match (`/admin`)
 
 1. **Add the match**: teams, stage, format and start time. Several matches can
-   be active at once. Each map gets three markets: map winner, 1st pistol and
-   2nd pistol.
-2. **Enter odds**: decimal odds for both teams from your external source, per
+   be active at once. A best of 3 or 5 gets two markets on the full match:
+   match winner, and correct score (2:0, 2:1, 1:2, 0:2, or the six scores of a
+   best of 5). Each map gets three more: map winner, 1st pistol and 2nd pistol.
+   A best of 1 has only the map markets.
+2. **Enter odds**: decimal odds for every outcome from your external source, per
    market. Update them whenever the outside line moves.
 3. **Open** markets one at a time, per map, or all at once. Markets without odds
    stay in draft and are hidden from players.
-4. **Close** each market when its map or round starts.
-5. **Pay out** by clicking the winner (asks for a second click). **Void**
-   refunds every stake, for example on a map 3 that is never played. Both can be
-   undone.
+4. **Close** each market when its map or round starts, and the full-match
+   markets when the match starts.
+5. **Pay out** by clicking **Won** next to the result (asks for a second
+   click). Each market is paid out on its own, so finishing a match means
+   paying out both the match winner and the correct score. **Void** refunds
+   every stake, for example on a map 3 that is never played. Both can be undone.
 6. **Archive** the match to take it off the home page.
 
 ## Live results
@@ -74,18 +83,18 @@ results arrive within that window.
 
 ## How odds work
 
-The price of each side is a blend, set in `src/lib/odds.ts`:
+The price of each outcome is a blend, set in `src/lib/odds.ts`:
 
 - `PROVIDED_WEIGHT` (0.5): half comes from the admin-entered odds, with the
   bookmaker margin normalized out, and half from the share of credits users have
-  staked on each side.
+  staked on each outcome.
 - `POOL_SEED` (50,000): virtual credits placed in each pool at the provided
   odds, so early bets nudge the line instead of swinging it. Lower it to make
   user bets move the line faster.
 
 A bet's odds are fixed when it is placed and are the odds *after* its own stake
 is counted, so a large bet gets a slightly worse price than the one displayed.
-That also means nobody can move the line with one bet and take the other side
-for a guaranteed profit. If the price worsens by more than 3% between a player
+That also means nobody can move the line with one bet and back the other
+outcomes for a guaranteed profit. If the price worsens by more than 3% between a player
 seeing it and the bet arriving, the bet is rejected and they are shown the new
 odds.

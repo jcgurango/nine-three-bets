@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { getUser, isAdmin } from "@/lib/auth";
 import * as store from "@/lib/store";
-import type { Pick, Result } from "@/lib/types";
+import type { Result } from "@/lib/types";
 
 async function run<T>(fn: () => Promise<T>): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
   try {
@@ -29,7 +29,7 @@ function admin(fn: () => Promise<unknown>): Promise<Result> {
 }
 
 const isId = (n: unknown): n is number => Number.isInteger(n) && (n as number) > 0;
-const isPick = (p: unknown): p is Pick => p === "a" || p === "b";
+const isOutcomeKey = (k: unknown): k is string => typeof k === "string" && /^[a-z0-9-]{1,8}$/.test(k);
 
 function assert(cond: unknown, message = "Invalid request."): asserts cond {
   if (!cond) throw new store.UserError(message);
@@ -39,7 +39,7 @@ function assert(cond: unknown, message = "Invalid request."): asserts cond {
 
 export async function placeBetAction(input: {
   marketId: number;
-  pick: Pick;
+  pick: string;
   stake: number;
   quotedOdds: number;
 }): Promise<Result<{ odds: number; payout: number }>> {
@@ -47,7 +47,7 @@ export async function placeBetAction(input: {
     const user = await getUser();
     assert(user, "Log in to place a bet.");
     assert(user.nickname, "Pick a nickname first.");
-    assert(isId(input?.marketId) && isPick(input.pick));
+    assert(isId(input?.marketId) && isOutcomeKey(input.pick));
     assert(typeof input.quotedOdds === "number" && Number.isFinite(input.quotedOdds));
     return store.placeBet({ ...input, userId: user.id });
   });
@@ -104,27 +104,29 @@ export async function deleteMatchAction(id: number): Promise<Result> {
   });
 }
 
-export async function saveMapAction(input: {
+export async function saveOddsAction(input: {
   matchId: number;
+  /** A map, or 0 for the match-level markets. */
   mapNumber: number;
-  name: string;
+  mapName: string;
   odds: store.OddsInput[];
 }): Promise<Result> {
   return admin(async () => {
-    assert(isId(input?.matchId) && isId(input.mapNumber) && Array.isArray(input.odds));
-    const validOdds = (o: unknown) => typeof o === "number" && o > 1 && o <= 1000;
+    assert(isId(input?.matchId) && Number.isInteger(input.mapNumber) && Array.isArray(input.odds));
     for (const o of input.odds) {
-      assert(isId(o?.marketId));
-      const empty = o.oddsA == null && o.oddsB == null;
-      assert(
-        empty || (validOdds(o.oddsA) && validOdds(o.oddsB)),
-        "Odds must be decimal odds greater than 1 for both teams (e.g. 1.65 and 2.20).",
-      );
+      assert(isId(o?.marketId) && o.odds && typeof o.odds === "object");
+      for (const [key, value] of Object.entries(o.odds)) {
+        assert(isOutcomeKey(key));
+        assert(
+          value == null || (typeof value === "number" && value > 1 && value <= 1000),
+          "Odds must be decimal odds greater than 1 (e.g. 1.65).",
+        );
+      }
     }
-    await store.saveMap(
+    await store.saveOdds(
       input.matchId,
       input.mapNumber,
-      String(input.name ?? "").trim().slice(0, 30),
+      String(input.mapName ?? "").trim().slice(0, 30),
       input.odds,
     );
   });
@@ -143,18 +145,18 @@ export async function bulkSetOpenAction(
   open: boolean,
 ): Promise<Result> {
   return admin(async () => {
-    assert(isId(matchId) && (mapNumber == null || isId(mapNumber)));
+    assert(isId(matchId) && (mapNumber == null || (Number.isInteger(mapNumber) && mapNumber >= 0)));
     const changed = await store.bulkSetOpen(matchId, mapNumber, open === true);
     assert(
       changed > 0,
-      open ? "Nothing to open. Draft markets need odds for both teams first." : "No open markets to close.",
+      open ? "Nothing to open. Draft markets need odds for every outcome first." : "No open markets to close.",
     );
   });
 }
 
-export async function settleMarketAction(marketId: number, result: Pick): Promise<Result> {
+export async function settleMarketAction(marketId: number, result: string): Promise<Result> {
   return admin(async () => {
-    assert(isId(marketId) && isPick(result));
+    assert(isId(marketId) && isOutcomeKey(result));
     await store.settleMarket(marketId, result);
   });
 }

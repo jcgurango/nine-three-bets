@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { showBalanceDelta } from "@/lib/delta";
-import { KIND_LABEL, type LiveEvent } from "@/lib/types";
+import { marketLabel } from "@/lib/outcomes";
+import type { LiveEvent } from "@/lib/types";
 import { Credits } from "./Credits";
 import { LoseAnimation, type Loss } from "./LoseAnimation";
 import { WinCelebration, type Win } from "./WinCelebration";
@@ -23,8 +24,7 @@ const TOAST_MS = 9000;
 const BATCH_MS = 350;
 const MUTE_KEY = "93:muted";
 
-const describe = (e: LiveEvent) =>
-  `${e.team} · Map ${e.mapNumber}${e.mapName ? ` (${e.mapName})` : ""} ${KIND_LABEL[e.marketKind].toLowerCase()}`;
+const describe = (e: LiveEvent) => `${e.label} · ${marketLabel(e.marketKind, e.mapNumber, e.mapName)}`;
 
 const sum = (events: LiveEvent[]) => events.reduce((n, e) => n + e.amount, 0);
 

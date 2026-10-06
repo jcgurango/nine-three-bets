@@ -5,7 +5,8 @@ import { LocalTime } from "@/components/LocalTime";
 import { getUser } from "@/lib/auth";
 import { oddsText } from "@/lib/format";
 import { listUserBets } from "@/lib/store";
-import { KIND_LABEL, type BetStatus, type BetView } from "@/lib/types";
+import { marketLabel, outcomeLabel, outcomeSide } from "@/lib/outcomes";
+import type { BetStatus, BetView } from "@/lib/types";
 
 const STATUS: Record<BetStatus, { label: string; className: string }> = {
   pending: { label: "Open", className: "text-bone" },
@@ -59,12 +60,11 @@ function BetTable({ title, bets, empty }: { title: string; bets: BetView[]; empt
                     </div>
                   </td>
                   <td className="px-4 py-2">
-                    <span className={b.pick === "a" ? "text-val" : "text-teal"}>
-                      {b.pick === "a" ? b.teamA : b.teamB}
+                    <span className={outcomeSide(b.pick) === "a" ? "text-val" : "text-teal"}>
+                      {outcomeLabel(b.pick, b.teamA, b.teamB)}
                     </span>
                     <div className="text-xs text-mute">
-                      Map {b.mapNumber}
-                      {b.mapName && ` (${b.mapName})`} · {KIND_LABEL[b.kind]}
+                      {marketLabel(b.kind, b.mapNumber, b.mapName)}
                     </div>
                   </td>
                   <td className="px-4 py-2 text-right font-mono tabular-nums">

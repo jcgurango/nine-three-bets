@@ -1,9 +1,10 @@
-import type { Row } from "@libsql/client";
+import type { Row, Transaction } from "@libsql/client";
 import { getDb, writeTx, STARTING_BALANCE } from "./db";
 import { wakeEventStreams } from "./live";
 import { quote } from "./odds";
+import { TEAM_OUTCOMES, matchLevelMarkets, outcomeLabel } from "./outcomes";
 import {
-  MARKET_KINDS,
+  MAP_KINDS,
   type BetStatus,
   type BetView,
   type LeaderboardRow,
@@ -13,7 +14,7 @@ import {
   type MarketKind,
   type MarketStatus,
   type Match,
-  type Pick,
+  type Outcome,
   type User,
 } from "./types";
 
@@ -32,18 +33,11 @@ function toUser(r: Row): User {
   };
 }
 
-function toMarket(r: Row): Market {
+function toOutcome(r: Row): Outcome {
   return {
-    id: Number(r.id),
-    matchId: Number(r.match_id),
-    mapNumber: Number(r.map_number),
-    kind: r.kind as MarketKind,
-    status: r.status as MarketStatus,
-    oddsA: r.odds_a == null ? null : Number(r.odds_a),
-    oddsB: r.odds_b == null ? null : Number(r.odds_b),
-    stakeA: Number(r.stake_a),
-    stakeB: Number(r.stake_b),
-    result: (r.result as Pick | null) ?? null,
+    key: String(r.key),
+    odds: r.odds == null ? null : Number(r.odds),
+    stake: Number(r.stake),
   };
 }
 
@@ -106,7 +100,7 @@ export async function getLeaderboard(): Promise<LeaderboardRow[]> {
             COALESCE(SUM(CASE WHEN b.status = 'pending' THEN b.stake END), 0) AS in_play,
             COALESCE(SUM(b.status = 'won'), 0) AS wins,
             COALESCE(SUM(b.status = 'lost'), 0) AS losses
-     FROM users u LEFT JOIN bets b ON b.user_id = u.id
+     FROM users u LEFT JOIN bets_v2 b ON b.user_id = u.id
      WHERE u.nickname IS NOT NULL
      GROUP BY u.id`,
   );
@@ -135,15 +129,36 @@ export async function listMatches(archived: boolean): Promise<Match[]> {
   });
   if (ms.rows.length === 0) return [];
   const ids = ms.rows.map((r) => Number(r.id));
-  const mk = await db.execute({
-    sql: `SELECT * FROM markets WHERE match_id IN (${ids.map(() => "?").join(",")})
-          ORDER BY map_number, id`,
-    args: ids,
-  });
-  const byMatch = new Map<number, Market[]>();
+  const inMatches = `match_id IN (${ids.map(() => "?").join(",")})`;
+  const [mk, oc] = await Promise.all([
+    db.execute({
+      sql: `SELECT * FROM markets_v2 WHERE ${inMatches} ORDER BY map_number, id`,
+      args: ids,
+    }),
+    db.execute({
+      sql: `SELECT * FROM outcomes
+            WHERE market_id IN (SELECT id FROM markets_v2 WHERE ${inMatches})
+            ORDER BY market_id, position`,
+      args: ids,
+    }),
+  ]);
+  const outcomesByMarket = new Map<number, Outcome[]>();
+  for (const r of oc.rows) {
+    const id = Number(r.market_id);
+    outcomesByMarket.set(id, [...(outcomesByMarket.get(id) ?? []), toOutcome(r)]);
+  }
+  const marketsByMatch = new Map<number, Market[]>();
   for (const r of mk.rows) {
-    const m = toMarket(r);
-    byMatch.set(m.matchId, [...(byMatch.get(m.matchId) ?? []), m]);
+    const market: Market = {
+      id: Number(r.id),
+      matchId: Number(r.match_id),
+      mapNumber: Number(r.map_number),
+      kind: r.kind as MarketKind,
+      status: r.status as MarketStatus,
+      outcomes: outcomesByMarket.get(Number(r.id)) ?? [],
+      result: r.result == null ? null : String(r.result),
+    };
+    marketsByMatch.set(market.matchId, [...(marketsByMatch.get(market.matchId) ?? []), market]);
   }
   return ms.rows.map((r) => ({
     id: Number(r.id),
@@ -154,7 +169,7 @@ export async function listMatches(archived: boolean): Promise<Match[]> {
     startsAt: r.starts_at == null ? null : Number(r.starts_at),
     archived: Number(r.archived) === 1,
     mapNames: parseMapNames(r.map_names),
-    markets: byMatch.get(Number(r.id)) ?? [],
+    markets: marketsByMatch.get(Number(r.id)) ?? [],
   }));
 }
 
@@ -163,6 +178,25 @@ export interface MatchInput {
   teamA: string;
   teamB: string;
   startsAt: number | null;
+}
+
+async function insertMarket(
+  tx: Transaction,
+  matchId: number,
+  mapNumber: number,
+  kind: MarketKind,
+  outcomeKeys: string[],
+): Promise<void> {
+  const rs = await tx.execute({
+    sql: "INSERT INTO markets_v2 (match_id, map_number, kind) VALUES (?, ?, ?)",
+    args: [matchId, mapNumber, kind],
+  });
+  for (const [position, key] of outcomeKeys.entries()) {
+    await tx.execute({
+      sql: "INSERT INTO outcomes (market_id, key, position) VALUES (?, ?, ?)",
+      args: [Number(rs.lastInsertRowid), key, position],
+    });
+  }
 }
 
 export async function createMatch(input: MatchInput & { bestOf: number }): Promise<void> {
@@ -180,13 +214,11 @@ export async function createMatch(input: MatchInput & { bestOf: number }): Promi
       ],
     });
     const matchId = Number(rs.lastInsertRowid);
+    for (const [kind, keys] of matchLevelMarkets(input.bestOf)) {
+      await insertMarket(tx, matchId, 0, kind, keys);
+    }
     for (let map = 1; map <= input.bestOf; map++) {
-      for (const kind of MARKET_KINDS) {
-        await tx.execute({
-          sql: "INSERT INTO markets (match_id, map_number, kind) VALUES (?, ?, ?)",
-          args: [matchId, map, kind],
-        });
-      }
+      for (const kind of MAP_KINDS) await insertMarket(tx, matchId, map, kind, TEAM_OUTCOMES);
     }
   });
 }
@@ -210,14 +242,18 @@ export async function setMatchArchived(id: number, archived: boolean): Promise<v
 export async function deleteMatch(id: number): Promise<void> {
   await writeTx(async (tx) => {
     const rs = await tx.execute({
-      sql: `SELECT COUNT(*) AS n FROM bets
-            WHERE market_id IN (SELECT id FROM markets WHERE match_id = ?)`,
+      sql: `SELECT COUNT(*) AS n FROM bets_v2
+            WHERE market_id IN (SELECT id FROM markets_v2 WHERE match_id = ?)`,
       args: [id],
     });
     if (Number(rs.rows[0].n) > 0) {
       throw new UserError("This match has bets on it. Void its markets and archive it instead.");
     }
-    await tx.execute({ sql: "DELETE FROM markets WHERE match_id = ?", args: [id] });
+    await tx.execute({
+      sql: "DELETE FROM outcomes WHERE market_id IN (SELECT id FROM markets_v2 WHERE match_id = ?)",
+      args: [id],
+    });
+    await tx.execute({ sql: "DELETE FROM markets_v2 WHERE match_id = ?", args: [id] });
     await tx.execute({ sql: "DELETE FROM matches WHERE id = ?", args: [id] });
   });
 }
@@ -226,15 +262,22 @@ export async function deleteMatch(id: number): Promise<void> {
 
 export interface OddsInput {
   marketId: number;
-  oddsA: number | null;
-  oddsB: number | null;
+  /** Provided decimal odds by outcome key. All null clears a draft market's odds. */
+  odds: Record<string, number | null>;
 }
 
-/** Save a map's name and the provided odds for its markets. */
-export async function saveMap(
+/** A market can only take bets once every outcome has provided odds. */
+const HAS_ALL_ODDS = `NOT EXISTS (
+  SELECT 1 FROM outcomes WHERE outcomes.market_id = markets_v2.id AND outcomes.odds IS NULL)`;
+
+/**
+ * Save the provided odds for one group of a match's markets: a map (with its
+ * name) or, for map number 0, the match-level markets.
+ */
+export async function saveOdds(
   matchId: number,
   mapNumber: number,
-  name: string,
+  mapName: string,
   odds: OddsInput[],
 ): Promise<void> {
   await writeTx(async (tx) => {
@@ -244,29 +287,42 @@ export async function saveMap(
     });
     if (!rs.rows[0]) throw new UserError("Match not found.");
     const bestOf = Number(rs.rows[0].best_of);
-    if (mapNumber < 1 || mapNumber > bestOf) throw new UserError("No such map.");
-    const names = parseMapNames(rs.rows[0].map_names);
-    while (names.length < bestOf) names.push("");
-    names[mapNumber - 1] = name;
-    await tx.execute({
-      sql: "UPDATE matches SET map_names = ? WHERE id = ?",
-      args: [JSON.stringify(names), matchId],
-    });
+    if (mapNumber < 0 || mapNumber > bestOf) throw new UserError("No such map.");
+    if (mapNumber > 0) {
+      const names = parseMapNames(rs.rows[0].map_names);
+      while (names.length < bestOf) names.push("");
+      names[mapNumber - 1] = mapName;
+      await tx.execute({
+        sql: "UPDATE matches SET map_names = ? WHERE id = ?",
+        args: [JSON.stringify(names), matchId],
+      });
+    }
     for (const o of odds) {
       const cur = await tx.execute({
-        sql: "SELECT status FROM markets WHERE id = ? AND match_id = ? AND map_number = ?",
+        sql: "SELECT status FROM markets_v2 WHERE id = ? AND match_id = ? AND map_number = ?",
         args: [o.marketId, matchId, mapNumber],
       });
       const status = cur.rows[0]?.status;
       // Settled and voided markets keep the odds they were priced with.
       if (status !== "draft" && status !== "open" && status !== "closed") continue;
-      if (status !== "draft" && (o.oddsA == null || o.oddsB == null)) {
+      const keys = await tx.execute({
+        sql: "SELECT key FROM outcomes WHERE market_id = ?",
+        args: [o.marketId],
+      });
+      const values = keys.rows.map((r) => o.odds[String(r.key)] ?? null);
+      const filled = values.filter((v) => v != null).length;
+      if (filled !== 0 && filled !== values.length) {
+        throw new UserError("Enter odds for every outcome of a market, or leave them all blank.");
+      }
+      if (status !== "draft" && filled === 0) {
         throw new UserError("Can't clear the odds on a market that's already been opened.");
       }
-      await tx.execute({
-        sql: "UPDATE markets SET odds_a = ?, odds_b = ? WHERE id = ?",
-        args: [o.oddsA, o.oddsB, o.marketId],
-      });
+      for (const [i, r] of keys.rows.entries()) {
+        await tx.execute({
+          sql: "UPDATE outcomes SET odds = ? WHERE market_id = ? AND key = ?",
+          args: [values[i], o.marketId, r.key],
+        });
+      }
     }
   });
 }
@@ -276,19 +332,18 @@ export async function setMarketOpen(marketId: number, open: boolean): Promise<vo
   const db = await getDb();
   const rs = open
     ? await db.execute({
-        sql: `UPDATE markets SET status = 'open'
-              WHERE id = ? AND status IN ('draft','closed')
-                AND odds_a IS NOT NULL AND odds_b IS NOT NULL`,
+        sql: `UPDATE markets_v2 SET status = 'open'
+              WHERE id = ? AND status IN ('draft','closed') AND ${HAS_ALL_ODDS}`,
         args: [marketId],
       })
     : await db.execute({
-        sql: "UPDATE markets SET status = 'closed' WHERE id = ? AND status = 'open'",
+        sql: "UPDATE markets_v2 SET status = 'closed' WHERE id = ? AND status = 'open'",
         args: [marketId],
       });
   if (rs.rowsAffected === 0) {
     throw new UserError(
       open
-        ? "Can't open: the market needs odds for both teams and must be in draft or closed."
+        ? "Can't open: the market needs odds for every outcome and must be in draft or closed."
         : "That market isn't open.",
     );
   }
@@ -296,7 +351,8 @@ export async function setMarketOpen(marketId: number, open: boolean): Promise<vo
 
 /**
  * Open every draft market that has odds, or close every open market, for a
- * whole match or a single map. Returns how many markets changed.
+ * whole match (`mapNumber` null) or one group of it (a map, or 0 for the
+ * match-level markets). Returns how many markets changed.
  */
 export async function bulkSetOpen(
   matchId: number,
@@ -308,49 +364,51 @@ export async function bulkSetOpen(
   const args = mapNumber == null ? [matchId] : [matchId, mapNumber];
   const rs = await db.execute({
     sql: open
-      ? `UPDATE markets SET status = 'open'
-         WHERE match_id = ? AND status = 'draft'
-           AND odds_a IS NOT NULL AND odds_b IS NOT NULL${mapFilter}`
-      : `UPDATE markets SET status = 'closed' WHERE match_id = ? AND status = 'open'${mapFilter}`,
+      ? `UPDATE markets_v2 SET status = 'open'
+         WHERE match_id = ? AND status = 'draft' AND ${HAS_ALL_ODDS}${mapFilter}`
+      : `UPDATE markets_v2 SET status = 'closed' WHERE match_id = ? AND status = 'open'${mapFilter}`,
     args,
   });
   return rs.rowsAffected;
 }
 
-/** Close the market (if needed), record the winner and pay out winning bets. */
-export async function settleMarket(marketId: number, result: Pick): Promise<void> {
+/** Close the market (if needed), record the winning outcome and pay out winning bets. */
+export async function settleMarket(marketId: number, result: string): Promise<void> {
   await writeTx(async (tx) => {
     const rs = await tx.execute({
-      sql: "SELECT status FROM markets WHERE id = ?",
-      args: [marketId],
+      sql: `SELECT m.status, o.key FROM markets_v2 m
+            LEFT JOIN outcomes o ON o.market_id = m.id AND o.key = ?
+            WHERE m.id = ?`,
+      args: [result, marketId],
     });
     const status = rs.rows[0]?.status;
     if (status !== "open" && status !== "closed") {
       throw new UserError("Only open or closed markets can be paid out.");
     }
+    if (rs.rows[0].key == null) throw new UserError("That isn't one of this market's outcomes.");
     await tx.execute({
-      sql: `INSERT INTO events (user_id, bet_id, kind, amount)
+      sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
             SELECT user_id, id,
                    CASE WHEN pick = ? THEN 'won' ELSE 'lost' END,
                    CASE WHEN pick = ? THEN payout ELSE -stake END
-            FROM bets WHERE market_id = ? AND status = 'pending'`,
+            FROM bets_v2 WHERE market_id = ? AND status = 'pending'`,
       args: [result, result, marketId],
     });
     await tx.execute({
       sql: `UPDATE users SET balance = balance + (
-              SELECT SUM(payout) FROM bets
-              WHERE bets.user_id = users.id AND market_id = ? AND pick = ? AND status = 'pending')
+              SELECT SUM(payout) FROM bets_v2
+              WHERE bets_v2.user_id = users.id AND market_id = ? AND pick = ? AND status = 'pending')
             WHERE id IN (
-              SELECT user_id FROM bets WHERE market_id = ? AND pick = ? AND status = 'pending')`,
+              SELECT user_id FROM bets_v2 WHERE market_id = ? AND pick = ? AND status = 'pending')`,
       args: [marketId, result, marketId, result],
     });
     await tx.execute({
-      sql: `UPDATE bets SET status = CASE WHEN pick = ? THEN 'won' ELSE 'lost' END
+      sql: `UPDATE bets_v2 SET status = CASE WHEN pick = ? THEN 'won' ELSE 'lost' END
             WHERE market_id = ? AND status = 'pending'`,
       args: [result, marketId],
     });
     await tx.execute({
-      sql: "UPDATE markets SET status = 'settled', result = ? WHERE id = ?",
+      sql: "UPDATE markets_v2 SET status = 'settled', result = ? WHERE id = ?",
       args: [result, marketId],
     });
   });
@@ -361,7 +419,7 @@ export async function settleMarket(marketId: number, result: Pick): Promise<void
 export async function voidMarket(marketId: number): Promise<void> {
   await writeTx(async (tx) => {
     const rs = await tx.execute({
-      sql: "SELECT status FROM markets WHERE id = ?",
+      sql: "SELECT status FROM markets_v2 WHERE id = ?",
       args: [marketId],
     });
     const status = rs.rows[0]?.status;
@@ -369,24 +427,24 @@ export async function voidMarket(marketId: number): Promise<void> {
       throw new UserError("Only unsettled markets can be voided.");
     }
     await tx.execute({
-      sql: `INSERT INTO events (user_id, bet_id, kind, amount)
+      sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
             SELECT user_id, id, 'refunded', stake
-            FROM bets WHERE market_id = ? AND status = 'pending'`,
+            FROM bets_v2 WHERE market_id = ? AND status = 'pending'`,
       args: [marketId],
     });
     await tx.execute({
       sql: `UPDATE users SET balance = balance + (
-              SELECT SUM(stake) FROM bets
-              WHERE bets.user_id = users.id AND market_id = ? AND status = 'pending')
-            WHERE id IN (SELECT user_id FROM bets WHERE market_id = ? AND status = 'pending')`,
+              SELECT SUM(stake) FROM bets_v2
+              WHERE bets_v2.user_id = users.id AND market_id = ? AND status = 'pending')
+            WHERE id IN (SELECT user_id FROM bets_v2 WHERE market_id = ? AND status = 'pending')`,
       args: [marketId, marketId],
     });
     await tx.execute({
-      sql: "UPDATE bets SET status = 'refunded' WHERE market_id = ? AND status = 'pending'",
+      sql: "UPDATE bets_v2 SET status = 'refunded' WHERE market_id = ? AND status = 'pending'",
       args: [marketId],
     });
     await tx.execute({
-      sql: "UPDATE markets SET status = 'void', result = NULL WHERE id = ?",
+      sql: "UPDATE markets_v2 SET status = 'void', result = NULL WHERE id = ?",
       args: [marketId],
     });
   });
@@ -401,7 +459,7 @@ export async function voidMarket(marketId: number): Promise<void> {
 export async function unsettleMarket(marketId: number): Promise<void> {
   await writeTx(async (tx) => {
     const rs = await tx.execute({
-      sql: "SELECT status, odds_a FROM markets WHERE id = ?",
+      sql: `SELECT status, ${HAS_ALL_ODDS} AS priced FROM markets_v2 WHERE id = ?`,
       args: [marketId],
     });
     const status = rs.rows[0]?.status;
@@ -410,26 +468,26 @@ export async function unsettleMarket(marketId: number): Promise<void> {
     }
     const [betStatus, column] = status === "settled" ? ["won", "payout"] : ["refunded", "stake"];
     await tx.execute({
-      sql: `INSERT INTO events (user_id, bet_id, kind, amount)
+      sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
             SELECT user_id, id, 'reversed',
                    CASE status WHEN 'won' THEN -payout WHEN 'refunded' THEN -stake ELSE 0 END
-            FROM bets WHERE market_id = ? AND status != 'pending'`,
+            FROM bets_v2 WHERE market_id = ? AND status != 'pending'`,
       args: [marketId],
     });
     await tx.execute({
       sql: `UPDATE users SET balance = balance - (
-              SELECT SUM(${column}) FROM bets
-              WHERE bets.user_id = users.id AND market_id = ? AND status = ?)
-            WHERE id IN (SELECT user_id FROM bets WHERE market_id = ? AND status = ?)`,
+              SELECT SUM(${column}) FROM bets_v2
+              WHERE bets_v2.user_id = users.id AND market_id = ? AND status = ?)
+            WHERE id IN (SELECT user_id FROM bets_v2 WHERE market_id = ? AND status = ?)`,
       args: [marketId, betStatus, marketId, betStatus],
     });
     await tx.execute({
-      sql: "UPDATE bets SET status = 'pending' WHERE market_id = ? AND status != 'pending'",
+      sql: "UPDATE bets_v2 SET status = 'pending' WHERE market_id = ? AND status != 'pending'",
       args: [marketId],
     });
     await tx.execute({
-      sql: "UPDATE markets SET status = ?, result = NULL WHERE id = ?",
-      args: [rs.rows[0].odds_a == null ? "draft" : "closed", marketId],
+      sql: "UPDATE markets_v2 SET status = ?, result = NULL WHERE id = ?",
+      args: [Number(rs.rows[0].priced) ? "closed" : "draft", marketId],
     });
   });
   wakeEventStreams();
@@ -440,7 +498,8 @@ export async function unsettleMarket(marketId: number): Promise<void> {
 export async function placeBet(input: {
   userId: string;
   marketId: number;
-  pick: Pick;
+  /** Key of the outcome being backed. */
+  pick: string;
   stake: number;
   /** The odds the user was shown for this stake. */
   quotedOdds: number;
@@ -448,16 +507,20 @@ export async function placeBet(input: {
   const { userId, marketId, pick, stake, quotedOdds } = input;
   if (!Number.isInteger(stake) || stake < 1) throw new UserError("Enter a stake of at least 1.");
   return writeTx(async (tx) => {
-    const mr = await tx.execute({ sql: "SELECT * FROM markets WHERE id = ?", args: [marketId] });
-    const market = mr.rows[0] ? toMarket(mr.rows[0]) : null;
-    if (!market || market.status !== "open") {
-      throw new UserError("Betting is closed on this market.");
-    }
+    const mr = await tx.execute({
+      sql: "SELECT status FROM markets_v2 WHERE id = ?",
+      args: [marketId],
+    });
+    if (mr.rows[0]?.status !== "open") throw new UserError("Betting is closed on this market.");
+    const or = await tx.execute({
+      sql: "SELECT * FROM outcomes WHERE market_id = ? ORDER BY position",
+      args: [marketId],
+    });
     const ur = await tx.execute({ sql: "SELECT balance FROM users WHERE id = ?", args: [userId] });
     if (!ur.rows[0]) throw new UserError("Account not found. Log in again.");
     if (stake > Number(ur.rows[0].balance)) throw new UserError("You don't have enough credits.");
 
-    const q = quote(market, pick, stake);
+    const q = quote(or.rows.map(toOutcome), pick, stake);
     if (!q) throw new UserError("Betting is closed on this market.");
     if (q.odds < quotedOdds * (1 - SLIPPAGE_TOLERANCE)) {
       throw new UserError(`The odds moved to ${q.odds.toFixed(2)}. Check the new price and try again.`);
@@ -468,12 +531,11 @@ export async function placeBet(input: {
       args: [stake, userId],
     });
     await tx.execute({
-      sql: `UPDATE markets SET ${pick === "a" ? "stake_a = stake_a" : "stake_b = stake_b"} + ?
-            WHERE id = ?`,
-      args: [stake, marketId],
+      sql: "UPDATE outcomes SET stake = stake + ? WHERE market_id = ? AND key = ?",
+      args: [stake, marketId, pick],
     });
     await tx.execute({
-      sql: "INSERT INTO bets (user_id, market_id, pick, stake, odds, payout) VALUES (?, ?, ?, ?, ?, ?)",
+      sql: "INSERT INTO bets_v2 (user_id, market_id, pick, stake, odds, payout) VALUES (?, ?, ?, ?, ?, ?)",
       args: [userId, marketId, pick, stake, q.odds, q.payout],
     });
     return { odds: q.odds, payout: q.payout };
@@ -486,8 +548,8 @@ export async function listUserBets(userId: string, limit = 300): Promise<BetView
     sql: `SELECT b.id, b.market_id, b.pick, b.stake, b.odds, b.payout, b.status, b.created_at,
                  m.match_id, m.map_number, m.kind,
                  x.label, x.team_a, x.team_b, x.map_names
-          FROM bets b
-          JOIN markets m ON m.id = b.market_id
+          FROM bets_v2 b
+          JOIN markets_v2 m ON m.id = b.market_id
           JOIN matches x ON x.id = m.match_id
           WHERE b.user_id = ?
           ORDER BY b.id DESC LIMIT ?`,
@@ -503,7 +565,7 @@ export async function listUserBets(userId: string, limit = 300): Promise<BetView
     mapNumber: Number(r.map_number),
     mapName: parseMapNames(r.map_names)[Number(r.map_number) - 1] ?? "",
     kind: r.kind as MarketKind,
-    pick: r.pick as Pick,
+    pick: String(r.pick),
     stake: Number(r.stake),
     odds: Number(r.odds),
     payout: Number(r.payout),
@@ -517,7 +579,7 @@ export async function listUserBets(userId: string, limit = 300): Promise<BetView
 /** Id of the newest event, used as the starting point for a first-time listener. */
 export async function latestEventId(): Promise<number> {
   const db = await getDb();
-  const rs = await db.execute("SELECT COALESCE(MAX(id), 0) AS id FROM events");
+  const rs = await db.execute("SELECT COALESCE(MAX(id), 0) AS id FROM events_v2");
   return Number(rs.rows[0].id);
 }
 
@@ -526,9 +588,9 @@ export async function listEventsAfter(userId: string, afterId: number): Promise<
   const rs = await db.execute({
     sql: `SELECT e.id, e.kind, e.amount, b.pick, b.odds, m.map_number, m.kind AS market_kind,
                  x.team_a, x.team_b, x.map_names
-          FROM events e
-          JOIN bets b ON b.id = e.bet_id
-          JOIN markets m ON m.id = b.market_id
+          FROM events_v2 e
+          JOIN bets_v2 b ON b.id = e.bet_id
+          JOIN markets_v2 m ON m.id = b.market_id
           JOIN matches x ON x.id = m.match_id
           WHERE e.user_id = ? AND e.id > ?
           ORDER BY e.id LIMIT 100`,
@@ -538,7 +600,7 @@ export async function listEventsAfter(userId: string, afterId: number): Promise<
     id: Number(r.id),
     kind: r.kind as LiveEventKind,
     amount: Number(r.amount),
-    team: String(r.pick === "a" ? r.team_a : r.team_b),
+    label: outcomeLabel(String(r.pick), String(r.team_a), String(r.team_b)),
     mapNumber: Number(r.map_number),
     mapName: parseMapNames(r.map_names)[Number(r.map_number) - 1] ?? "",
     marketKind: r.market_kind as MarketKind,

@@ -4,17 +4,30 @@ import { useState, useTransition } from "react";
 import { placeBetAction } from "@/app/actions";
 import { oddsText } from "@/lib/format";
 import { quote } from "@/lib/odds";
-import { KIND_LABEL, type BetView, type Market, type Match, type Pick } from "@/lib/types";
+import { outcomeLabel, outcomeSide } from "@/lib/outcomes";
+import { KIND_LABEL, type BetView, type Market, type Match, type Side } from "@/lib/types";
 import { Credits } from "./Credits";
 import { LocalTime } from "./LocalTime";
 
 interface Selection {
   marketId: number;
-  pick: Pick;
+  /** Outcome key. */
+  pick: string;
 }
 
-const SIDE_TEXT: Record<Pick, string> = { a: "text-val", b: "text-teal" };
+const SIDE_TEXT: Record<Side, string> = { a: "text-val", b: "text-teal" };
+const SIDE_SELECTED: Record<Side, string> = {
+  a: "border-val bg-val/15",
+  b: "border-teal bg-teal/15",
+};
+const SIDE_BAR: Record<Side, string> = { a: "bg-val/80", b: "bg-teal/70" };
 const VISIBLE = new Set(["open", "closed", "settled"]);
+/** Odds buttons per row, by number of outcomes: pairs side by side, scores in a tidy grid. */
+const GRID: Record<number, string> = {
+  2: "grid-cols-2",
+  4: "grid-cols-2 md:grid-cols-4",
+  6: "grid-cols-2 md:grid-cols-3",
+};
 
 export function MatchCard({
   match,
@@ -28,8 +41,9 @@ export function MatchCard({
   balance: number | null;
 }) {
   const [selection, setSelection] = useState<Selection | null>(null);
-  const markets = match.markets.filter((m) => VISIBLE.has(m.status));
-  const maps = [...new Set(markets.map((m) => m.mapNumber))];
+  const markets = match.markets.filter((m) => VISIBLE.has(m.status) && quote(m.outcomes, m.outcomes[0]?.key));
+  // Map number 0 holds the match-level markets, so it sorts to the top.
+  const groups = [...new Set(markets.map((m) => m.mapNumber))].sort((x, y) => x - y);
   const anyOpen = markets.some((m) => m.status === "open");
   const allSettled = markets.length > 0 && markets.every((m) => m.status === "settled");
 
@@ -55,14 +69,14 @@ export function MatchCard({
         </h3>
       </header>
 
-      {maps.length === 0 && (
+      {groups.length === 0 && (
         <p className="px-4 py-6 text-sm text-mute">Odds aren&apos;t up yet. Check back soon.</p>
       )}
 
-      {maps.map((mapNumber) => (
+      {groups.map((mapNumber) => (
         <section key={mapNumber} className="border-b border-line last:border-b-0">
           <h4 className="bg-ink/40 px-4 py-1.5 font-display text-sm font-semibold uppercase tracking-widest text-mute">
-            Map {mapNumber}
+            {mapNumber === 0 ? "Full match" : `Map ${mapNumber}`}
             {match.mapNames[mapNumber - 1] && (
               <span className="text-bone"> · {match.mapNames[mapNumber - 1]}</span>
             )}
@@ -106,19 +120,17 @@ function MarketRow({
   market: Market;
   bets: BetView[];
   balance: number | null;
-  pick: Pick | null;
-  onPick: (pick: Pick) => void;
+  pick: string | null;
+  onPick: (pick: string) => void;
 }) {
-  const qa = quote(market, "a");
-  const qb = quote(market, "b");
-  if (!qa || !qb) return null;
   const open = market.status === "open";
-  const teams: Record<Pick, string> = { a: match.teamA, b: match.teamB };
+  const label = (key: string) => outcomeLabel(key, match.teamA, match.teamB);
+  const isScore = market.kind === "score";
 
   return (
     <div className="px-4 py-3">
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-        <div className="flex items-center gap-2 text-sm sm:w-28 sm:flex-col sm:items-start sm:gap-0">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
+        <div className="flex items-center gap-2 text-sm sm:w-28 sm:flex-col sm:items-start sm:gap-0 sm:pt-2">
           <span className="font-medium">{KIND_LABEL[market.kind]}</span>
           {!open && (
             <span className="text-xs uppercase tracking-wide text-mute">
@@ -126,44 +138,66 @@ function MarketRow({
             </span>
           )}
         </div>
-        <div className="grid flex-1 grid-cols-2 gap-2">
-          {(["a", "b"] as const).map((side) => {
-            const won = market.result === side;
-            const lost = market.result != null && !won;
-            return (
-              <button
-                key={side}
-                type="button"
-                disabled={!open}
-                aria-pressed={pick === side}
-                onClick={() => onPick(side)}
-                className={`flex items-center justify-between gap-2 rounded border px-3 py-2 text-left transition-colors ${
-                  pick === side && open
-                    ? side === "a"
-                      ? "border-val bg-val/15"
-                      : "border-teal bg-teal/15"
-                    : won
-                      ? "border-gold/70 bg-gold/10"
-                      : "border-line bg-raised"
-                } ${open ? "hover:border-bone/50" : ""} ${lost ? "opacity-40" : ""} ${
-                  !open && !won && !lost ? "opacity-60" : ""
-                }`}
-              >
-                <span className="min-w-0 truncate text-sm font-semibold">
-                  {teams[side]}
-                  {won && <span className="ml-2 text-xs font-bold uppercase text-gold">Won</span>}
-                </span>
-                <span className="font-mono text-base font-bold tabular-nums">
-                  {oddsText((side === "a" ? qa : qb).odds)}
-                </span>
-              </button>
-            );
-          })}
+        <div className="flex-1">
+          <div className={`grid gap-2 ${GRID[market.outcomes.length] ?? "grid-cols-2"}`}>
+            {market.outcomes.map(({ key }) => {
+              const side = outcomeSide(key);
+              const won = market.result === key;
+              const lost = market.result != null && !won;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  disabled={!open}
+                  aria-pressed={pick === key}
+                  aria-label={`${label(key)}, odds ${oddsText(quote(market.outcomes, key)!.odds)}`}
+                  onClick={() => onPick(key)}
+                  className={`flex items-center justify-between gap-2 rounded border px-3 py-2 text-left transition-colors ${
+                    pick === key && open
+                      ? SIDE_SELECTED[side]
+                      : won
+                        ? "border-gold/70 bg-gold/10"
+                        : "border-line bg-raised"
+                  } ${open ? "hover:border-bone/50" : ""} ${lost ? "opacity-40" : ""} ${
+                    !open && !won && !lost ? "opacity-60" : ""
+                  }`}
+                >
+                  {isScore ? (
+                    <span className="min-w-0 leading-tight">
+                      <span className={`block truncate text-xs ${SIDE_TEXT[side]}`}>
+                        {side === "a" ? match.teamA : match.teamB}
+                      </span>
+                      <span className="text-sm font-semibold">
+                        {key.split("-").map(Number).sort((x, y) => y - x).join(":")}
+                        {won && <span className="ml-2 text-xs font-bold uppercase text-gold">Won</span>}
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="min-w-0 truncate text-sm font-semibold">
+                      {label(key)}
+                      {won && <span className="ml-2 text-xs font-bold uppercase text-gold">Won</span>}
+                    </span>
+                  )}
+                  <span className="font-mono text-base font-bold tabular-nums">
+                    {oddsText(quote(market.outcomes, key)!.odds)}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
           <div
-            className="col-span-2 flex h-1 overflow-hidden rounded-full bg-teal/70"
-            title={`${Math.round(qa.prob * 100)}% ${match.teamA} / ${Math.round(qb.prob * 100)}% ${match.teamB}`}
+            className="mt-2 flex h-1 gap-px overflow-hidden rounded-full"
+            title={market.outcomes
+              .map(({ key }) => `${Math.round(quote(market.outcomes, key)!.prob * 100)}% ${label(key)}`)
+              .join(" / ")}
           >
-            <div className="bg-val/80 transition-[width] duration-500" style={{ width: `${qa.prob * 100}%` }} />
+            {market.outcomes.map(({ key }) => (
+              <div
+                key={key}
+                className={`transition-[flex-grow] duration-500 ${SIDE_BAR[outcomeSide(key)]}`}
+                style={{ flexGrow: quote(market.outcomes, key)!.prob, flexBasis: 0 }}
+              />
+            ))}
           </div>
         </div>
       </div>
@@ -173,7 +207,7 @@ function MarketRow({
           key={pick}
           market={market}
           pick={pick}
-          team={teams[pick]}
+          label={label(pick)}
           balance={balance}
         />
       )}
@@ -183,7 +217,7 @@ function MarketRow({
           {bets.map((b) => (
             <li key={b.id}>
               You: <Credits n={b.stake} className="text-bone" /> on{" "}
-              <span className={SIDE_TEXT[b.pick]}>{teams[b.pick]}</span> @ {oddsText(b.odds)}
+              <span className={SIDE_TEXT[outcomeSide(b.pick)]}>{label(b.pick)}</span> @ {oddsText(b.odds)}
               {b.status === "pending" && <> → pays <Credits n={b.payout} /></>}
               {b.status === "won" && <span className="text-gold"> · won <Credits n={b.payout} /></span>}
               {b.status === "lost" && <> · lost</>}
@@ -201,12 +235,14 @@ const CHIPS = [1000, 5000, 10000];
 function BetSlip({
   market,
   pick,
-  team,
+  label,
   balance,
 }: {
   market: Market;
-  pick: Pick;
-  team: string;
+  /** Outcome key. */
+  pick: string;
+  /** What the outcome is called, e.g. "Paper Rex" or "Paper Rex 2:1". */
+  label: string;
   balance: number | null;
 }) {
   const [stakeText, setStakeText] = useState("");
@@ -220,13 +256,13 @@ function BetSlip({
         <a href="/api/auth/login" className="font-semibold text-[#8b95ff] hover:underline">
           Log in with Discord
         </a>{" "}
-        to bet on {team}. You start with 50,000 credits.
+        to bet on {label}. You start with 50,000 credits.
       </div>
     );
   }
 
   const stake = Number(stakeText) || 0;
-  const q = quote(market, pick, stake);
+  const q = quote(market.outcomes, pick, stake);
   const tooMuch = stake > balance;
   const setStake = (n: number) => {
     setStakeText(n > 0 ? String(Math.floor(n)) : "");
@@ -259,7 +295,7 @@ function BetSlip({
     >
       <div className="flex flex-wrap items-center gap-2">
         <label className="sr-only" htmlFor={`stake-${market.id}`}>
-          Stake on {team}
+          Stake on {label}
         </label>
         <input
           id={`stake-${market.id}`}
@@ -292,10 +328,10 @@ function BetSlip({
           type="submit"
           disabled={pending || stake < 1 || tooMuch}
           className={`ml-auto rounded px-4 py-1.5 text-sm font-bold text-ink disabled:opacity-40 ${
-            pick === "a" ? "bg-val" : "bg-teal"
+            outcomeSide(pick) === "a" ? "bg-val" : "bg-teal"
           }`}
         >
-          {pending ? "Placing…" : `Bet on ${team}`}
+          {pending ? "Placing…" : `Bet on ${label}`}
         </button>
       </div>
       <p className="mt-2 text-xs text-mute" aria-live="polite">
@@ -303,7 +339,7 @@ function BetSlip({
           <span className="text-val">{error}</span>
         ) : placed ? (
           <span className="text-teal">
-            Bet placed: <Credits n={placed.stake} /> on {team} @ {oddsText(placed.odds)}, pays{" "}
+            Bet placed: <Credits n={placed.stake} /> on {label} @ {oddsText(placed.odds)}, pays{" "}
             <Credits n={placed.payout} />.
           </span>
         ) : tooMuch ? (
@@ -313,7 +349,7 @@ function BetSlip({
         ) : stake > 0 && q ? (
           <>
             Your odds for this stake: <b className="text-bone">{oddsText(q.odds)}</b>. Pays{" "}
-            <Credits n={q.payout} className="font-bold text-bone" /> if {team} win. Odds lock in when you bet.
+            <Credits n={q.payout} className="font-bold text-bone" /> if it comes in. Odds lock in when you bet.
           </>
         ) : (
           <>Bigger stakes move the line, so your odds depend on how much you bet.</>

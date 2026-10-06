@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { createClient, type Client, type Transaction } from "@libsql/client";
+import { matchLevelMarkets } from "./outcomes";
 
 export const STARTING_BALANCE = 50_000;
 
@@ -24,41 +25,49 @@ CREATE TABLE IF NOT EXISTS matches (
   map_names TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
-CREATE TABLE IF NOT EXISTS markets (
+CREATE TABLE IF NOT EXISTS markets_v2 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   match_id INTEGER NOT NULL REFERENCES matches(id),
   map_number INTEGER NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('map','pistol1','pistol2')),
+  kind TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','open','closed','settled','void')),
-  odds_a REAL,
-  odds_b REAL,
-  stake_a INTEGER NOT NULL DEFAULT 0,
-  stake_b INTEGER NOT NULL DEFAULT 0,
-  result TEXT CHECK (result IN ('a','b')),
+  result TEXT,
   UNIQUE (match_id, map_number, kind)
 );
-CREATE TABLE IF NOT EXISTS bets (
+CREATE TABLE IF NOT EXISTS outcomes (
+  market_id INTEGER NOT NULL REFERENCES markets_v2(id),
+  key TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  odds REAL,
+  stake INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (market_id, key)
+);
+CREATE TABLE IF NOT EXISTS bets_v2 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id TEXT NOT NULL REFERENCES users(id),
-  market_id INTEGER NOT NULL REFERENCES markets(id),
-  pick TEXT NOT NULL CHECK (pick IN ('a','b')),
+  market_id INTEGER NOT NULL REFERENCES markets_v2(id),
+  pick TEXT NOT NULL,
   stake INTEGER NOT NULL CHECK (stake > 0),
   odds REAL NOT NULL,
   payout INTEGER NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','won','lost','refunded')),
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
-CREATE TABLE IF NOT EXISTS events (
+CREATE TABLE IF NOT EXISTS events_v2 (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id TEXT NOT NULL REFERENCES users(id),
-  bet_id INTEGER NOT NULL REFERENCES bets(id),
+  bet_id INTEGER NOT NULL REFERENCES bets_v2(id),
   kind TEXT NOT NULL CHECK (kind IN ('won','lost','refunded','reversed')),
   amount INTEGER NOT NULL,
   created_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
-CREATE INDEX IF NOT EXISTS events_user ON events(user_id, id);
-CREATE INDEX IF NOT EXISTS bets_user ON bets(user_id);
-CREATE INDEX IF NOT EXISTS bets_market ON bets(market_id);
+CREATE INDEX IF NOT EXISTS events_v2_user ON events_v2(user_id, id);
+CREATE INDEX IF NOT EXISTS bets_v2_user ON bets_v2(user_id);
+CREATE INDEX IF NOT EXISTS bets_v2_market ON bets_v2(market_id);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
 
 // Survive dev-server module reloads with a single client.
@@ -82,7 +91,79 @@ async function init(): Promise<Client> {
   await client.execute(
     "CREATE UNIQUE INDEX IF NOT EXISTS users_nickname ON users(nickname COLLATE NOCASE)",
   );
+  await migrateToV2(client);
   return client;
+}
+
+/**
+ * Version 1 stored exactly two outcomes per market, in columns on `markets`.
+ * Version 2 gives each market any number of outcomes (needed for correct
+ * score) in `markets_v2` + `outcomes`, with `bets_v2` and `events_v2` pointing
+ * at them. Data is copied across once with its ids intact; the version 1
+ * tables are left untouched as a backup and are no longer read.
+ */
+async function migrateToV2(client: Client): Promise<void> {
+  const tx = await client.transaction("write");
+  try {
+    const version = await tx.execute("SELECT value FROM meta WHERE key = 'schema_version'");
+    if (Number(version.rows[0]?.value ?? 1) >= 2) return;
+
+    const legacy = await tx.execute(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('markets','bets','events')",
+    );
+    const has = (name: string) => legacy.rows.some((r) => r.name === name);
+    if (has("markets")) {
+      await tx.execute(
+        `INSERT INTO markets_v2 (id, match_id, map_number, kind, status, result)
+         SELECT id, match_id, map_number, kind, status, result FROM markets`,
+      );
+      await tx.execute(
+        `INSERT INTO outcomes (market_id, key, position, odds, stake)
+         SELECT id, 'a', 0, odds_a, stake_a FROM markets
+         UNION ALL
+         SELECT id, 'b', 1, odds_b, stake_b FROM markets`,
+      );
+    }
+    if (has("bets")) {
+      await tx.execute(
+        `INSERT INTO bets_v2 (id, user_id, market_id, pick, stake, odds, payout, status, created_at)
+         SELECT id, user_id, market_id, pick, stake, odds, payout, status, created_at FROM bets`,
+      );
+    }
+    if (has("events")) {
+      await tx.execute(
+        `INSERT INTO events_v2 (id, user_id, bet_id, kind, amount, created_at)
+         SELECT id, user_id, bet_id, kind, amount, created_at FROM events`,
+      );
+    }
+
+    // Matches created before match-level markets existed get them now, as drafts.
+    const matches = await tx.execute("SELECT id, best_of FROM matches");
+    for (const m of matches.rows) {
+      for (const [kind, keys] of matchLevelMarkets(Number(m.best_of))) {
+        const market = await tx.execute({
+          sql: "INSERT INTO markets_v2 (match_id, map_number, kind) VALUES (?, 0, ?)",
+          args: [m.id, kind],
+        });
+        for (const [position, key] of keys.entries()) {
+          await tx.execute({
+            sql: "INSERT INTO outcomes (market_id, key, position) VALUES (?, ?, ?)",
+            args: [market.lastInsertRowid!, key, position],
+          });
+        }
+      }
+    }
+
+    await tx.execute(
+      "INSERT INTO meta (key, value) VALUES ('schema_version', '2') ON CONFLICT (key) DO UPDATE SET value = '2'",
+    );
+    await tx.commit();
+  } catch (e) {
+    await tx.rollback().catch(() => {});
+    throw e;
+  } finally {
+    tx.close();
+  }
 }
 
 export function getDb(): Promise<Client> {

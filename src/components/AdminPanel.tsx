@@ -5,7 +5,7 @@ import {
   bulkSetOpenAction,
   createMatchAction,
   deleteMatchAction,
-  saveMapAction,
+  saveOddsAction,
   setMarketOpenAction,
   setMatchArchivedAction,
   settleMarketAction,
@@ -15,6 +15,7 @@ import {
 } from "@/app/actions";
 import { oddsText } from "@/lib/format";
 import { quote } from "@/lib/odds";
+import { outcomeLabel, outcomeSide } from "@/lib/outcomes";
 import { KIND_LABEL, type Market, type MarketStatus, type Match, type Result } from "@/lib/types";
 import { Credits } from "./Credits";
 import { LocalTime } from "./LocalTime";
@@ -82,7 +83,10 @@ export function AdminPanel({ active, archived }: { active: Match[]; archived: Ma
         <ol className="mt-2 list-inside list-decimal space-y-0.5 text-sm text-mute">
           <li>Add the match, then type in the odds from your source for each map and save.</li>
           <li>Open the markets to take bets. Close each one when its map or round starts.</li>
-          <li>Click the winner to pay out. Void refunds everyone (e.g. a map that isn&apos;t played).</li>
+          <li>
+            Click <b>Won</b> next to the result to pay out. Void refunds everyone (e.g. a map that
+            isn&apos;t played).
+          </li>
         </ol>
       </section>
 
@@ -222,7 +226,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function AdminMatch({ match }: { match: Match }) {
   const [editing, setEditing] = useState(false);
   const { pending, error, run } = useRun();
-  const maps = Array.from({ length: match.bestOf }, (_, i) => i + 1);
+  // Group 0 is the match-level markets (absent for a best of 1), then one group per map.
+  const groups = [...new Set(match.markets.map((m) => m.mapNumber))].sort((x, y) => x - y);
 
   return (
     <section className="overflow-hidden rounded-lg border border-line bg-panel">
@@ -271,8 +276,8 @@ function AdminMatch({ match }: { match: Match }) {
         )}
         {error && <p className="text-sm text-val">{error}</p>}
       </header>
-      {maps.map((n) => (
-        <AdminMap
+      {groups.map((n) => (
+        <AdminGroup
           key={n}
           match={match}
           mapNumber={n}
@@ -294,7 +299,8 @@ const STATUS_STYLE: Record<MarketStatus, string> = {
 const oddsField = (n: number | null) => (n == null ? "" : String(n));
 const parseOdds = (s: string) => (s.trim() === "" ? null : Number(s));
 
-function AdminMap({
+/** One block of a match's markets: a map, or the match-level markets when `mapNumber` is 0. */
+function AdminGroup({
   match,
   mapNumber,
   markets,
@@ -303,26 +309,29 @@ function AdminMap({
   mapNumber: number;
   markets: Market[];
 }) {
+  const isMap = mapNumber > 0;
   const savedName = match.mapNames[mapNumber - 1] ?? "";
   const [name, setName] = useState(savedName);
-  const [odds, setOdds] = useState<Record<number, { a: string; b: string }>>(() =>
-    Object.fromEntries(markets.map((m) => [m.id, { a: oddsField(m.oddsA), b: oddsField(m.oddsB) }])),
+  // Odds as typed, by market id then outcome key.
+  const [odds, setOdds] = useState<Record<number, Record<string, string>>>(() =>
+    Object.fromEntries(
+      markets.map((m) => [m.id, Object.fromEntries(m.outcomes.map((o) => [o.key, oddsField(o.odds)]))]),
+    ),
   );
   const { pending, error, run } = useRun();
 
   const dirty =
     name !== savedName ||
-    markets.some((m) => parseOdds(odds[m.id].a) !== m.oddsA || parseOdds(odds[m.id].b) !== m.oddsB);
+    markets.some((m) => m.outcomes.some((o) => parseOdds(odds[m.id][o.key]) !== o.odds));
 
   const save = () =>
-    saveMapAction({
+    saveOddsAction({
       matchId: match.id,
       mapNumber,
-      name,
+      mapName: name,
       odds: markets.map((m) => ({
         marketId: m.id,
-        oddsA: parseOdds(odds[m.id].a),
-        oddsB: parseOdds(odds[m.id].b),
+        odds: Object.fromEntries(m.outcomes.map((o) => [o.key, parseOdds(odds[m.id][o.key])])),
       })),
     });
 
@@ -336,110 +345,115 @@ function AdminMap({
       return fn();
     });
 
-  const setOne = (id: number, side: "a" | "b", value: string) =>
-    setOdds((o) => ({ ...o, [id]: { ...o[id], [side]: value } }));
+  const setOne = (id: number, key: string, value: string) =>
+    setOdds((o) => ({ ...o, [id]: { ...o[id], [key]: value } }));
 
   return (
     <div className="border-b border-line p-4 last:border-b-0">
       <div className="mb-3 flex flex-wrap items-center gap-2">
-        <h3 className="font-display text-lg font-bold uppercase tracking-wide">Map {mapNumber}</h3>
-        <input
-          className={`${input} w-36`}
-          placeholder="Map name"
-          aria-label={`Map ${mapNumber} name`}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
+        <h3 className="font-display text-lg font-bold uppercase tracking-wide">
+          {isMap ? `Map ${mapNumber}` : "Full match"}
+        </h3>
+        {isMap && (
+          <input
+            className={`${input} w-36`}
+            placeholder="Map name"
+            aria-label={`Map ${mapNumber} name`}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+        )}
         <button
           className={`${btn} ${dirty ? "border-val! text-val!" : ""}`}
           disabled={pending || !dirty}
           onClick={() => run(save)}
         >
-          {dirty ? "Save odds & name" : "Saved"}
+          {dirty ? (isMap ? "Save odds & name" : "Save odds") : "Saved"}
         </button>
         <span className="ml-auto flex gap-2">
           <button className={btn} disabled={pending} onClick={() => act(() => bulkSetOpenAction(match.id, mapNumber, true))}>
-            Open map
+            {isMap ? "Open map" : "Open both"}
           </button>
           <button className={btn} disabled={pending} onClick={() => act(() => bulkSetOpenAction(match.id, mapNumber, false))}>
-            Close map
+            {isMap ? "Close map" : "Close both"}
           </button>
         </span>
       </div>
 
       <div className="space-y-2">
         {markets.map((m) => {
-          const qa = quote(m, "a");
-          const qb = quote(m, "b");
           const locked = m.status === "settled" || m.status === "void";
+          const canSettle = m.status === "open" || m.status === "closed";
           return (
-            <div key={m.id} className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded bg-ink/40 px-3 py-2">
-              <span className="w-24 text-sm font-medium">{KIND_LABEL[m.kind]}</span>
-              <span className={`w-16 rounded px-1.5 py-0.5 text-center text-xs font-bold uppercase ${STATUS_STYLE[m.status]}`}>
-                {m.status}
-              </span>
-              {(["a", "b"] as const).map((side) => (
-                <label key={side} className="flex items-center gap-1.5 text-xs text-mute">
-                  <span className={`max-w-24 truncate ${side === "a" ? "text-val" : "text-teal"}`}>
-                    {side === "a" ? match.teamA : match.teamB}
-                  </span>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="1.01"
-                    placeholder="odds"
-                    disabled={locked}
-                    className={`${input} w-20 font-mono disabled:opacity-50`}
-                    value={odds[m.id][side]}
-                    onChange={(e) => setOne(m.id, side, e.target.value)}
-                  />
-                </label>
-              ))}
-              <span className="min-w-44 flex-1 text-xs text-mute">
-                {qa && qb ? (
-                  <>
-                    Live {oddsText(qa.odds)} / {oddsText(qb.odds)} · staked <Credits n={m.stakeA} /> /{" "}
-                    <Credits n={m.stakeB} />
-                  </>
-                ) : (
-                  "No odds yet"
-                )}
-                {m.result && (
-                  <span className="text-gold"> · {m.result === "a" ? match.teamA : match.teamB} won</span>
-                )}
-              </span>
-              <span className="flex flex-wrap gap-1.5">
-                {(m.status === "draft" || m.status === "closed") && (
-                  <button className={btn} disabled={pending} onClick={() => act(() => setMarketOpenAction(m.id, true))}>
-                    {m.status === "draft" ? "Open" : "Reopen"}
-                  </button>
-                )}
-                {m.status === "open" && (
-                  <button className={btn} disabled={pending} onClick={() => act(() => setMarketOpenAction(m.id, false))}>
-                    Close
-                  </button>
-                )}
-                {(m.status === "open" || m.status === "closed") && (
-                  <>
-                    <ConfirmButton disabled={pending} onConfirm={() => act(() => settleMarketAction(m.id, "a"))}>
-                      {match.teamA} won
+            <div key={m.id} className="rounded bg-ink/40 px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="w-28 text-sm font-medium">{KIND_LABEL[m.kind]}</span>
+                <span className={`w-16 rounded px-1.5 py-0.5 text-center text-xs font-bold uppercase ${STATUS_STYLE[m.status]}`}>
+                  {m.status}
+                </span>
+                <span className="ml-auto flex flex-wrap gap-1.5">
+                  {(m.status === "draft" || m.status === "closed") && (
+                    <button className={btn} disabled={pending} onClick={() => act(() => setMarketOpenAction(m.id, true))}>
+                      {m.status === "draft" ? "Open" : "Reopen"}
+                    </button>
+                  )}
+                  {m.status === "open" && (
+                    <button className={btn} disabled={pending} onClick={() => act(() => setMarketOpenAction(m.id, false))}>
+                      Close
+                    </button>
+                  )}
+                  {!locked && (
+                    <ConfirmButton disabled={pending} onConfirm={() => act(() => voidMarketAction(m.id))}>
+                      Void
                     </ConfirmButton>
-                    <ConfirmButton disabled={pending} onConfirm={() => act(() => settleMarketAction(m.id, "b"))}>
-                      {match.teamB} won
+                  )}
+                  {locked && (
+                    <ConfirmButton disabled={pending} onConfirm={() => run(() => unsettleMarketAction(m.id))}>
+                      {m.status === "settled" ? "Undo payout" : "Undo void"}
                     </ConfirmButton>
-                  </>
-                )}
-                {!locked && (
-                  <ConfirmButton disabled={pending} onConfirm={() => act(() => voidMarketAction(m.id))}>
-                    Void
-                  </ConfirmButton>
-                )}
-                {locked && (
-                  <ConfirmButton disabled={pending} onConfirm={() => run(() => unsettleMarketAction(m.id))}>
-                    {m.status === "settled" ? "Undo payout" : "Undo void"}
-                  </ConfirmButton>
-                )}
-              </span>
+                  )}
+                </span>
+              </div>
+              <div className="mt-2 grid gap-x-6 gap-y-2 lg:grid-cols-2">
+                {m.outcomes.map((o) => {
+                  const q = quote(m.outcomes, o.key);
+                  const label = outcomeLabel(o.key, match.teamA, match.teamB);
+                  return (
+                    <div key={o.key} className="flex items-center gap-2 text-xs text-mute">
+                      <label className="flex items-center gap-2">
+                        <span
+                          className={`w-28 truncate ${outcomeSide(o.key) === "a" ? "text-val" : "text-teal"}`}
+                        >
+                          {label}
+                        </span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="1.01"
+                          placeholder="odds"
+                          disabled={locked}
+                          className={`${input} w-20 font-mono disabled:opacity-50`}
+                          value={odds[m.id][o.key]}
+                          onChange={(e) => setOne(m.id, o.key, e.target.value)}
+                        />
+                      </label>
+                      <span className="min-w-32 flex-1">
+                        {q ? <>Live {oddsText(q.odds)} · </> : null}
+                        <Credits n={o.stake} /> staked
+                      </span>
+                      {m.result === o.key && <span className="font-bold uppercase text-gold">Won</span>}
+                      {canSettle && (
+                        <ConfirmButton
+                          disabled={pending}
+                          onConfirm={() => act(() => settleMarketAction(m.id, o.key))}
+                        >
+                          <span className="sr-only">{label} </span>Won
+                        </ConfirmButton>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           );
         })}
