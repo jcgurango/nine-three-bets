@@ -1,10 +1,16 @@
 import type { Outcome } from "./types";
 
-/** How much of the price comes from the admin-provided odds vs. what users have bet. */
-export const PROVIDED_WEIGHT = 0.5;
+/**
+ * How much of the price comes from the provided odds vs. what users have bet.
+ * 1 means prices are the provided odds alone (margin removed) and user bets
+ * don't move the line. Changing this only affects prices from now on: every
+ * bet keeps the odds it was placed at.
+ */
+export const PROVIDED_WEIGHT = 1;
 /**
  * Virtual credits seeded into each market at the provided odds, so the first
  * few bets nudge the price instead of swinging the user-driven half to 100%.
+ * Only matters when PROVIDED_WEIGHT is below 1.
  */
 export const POOL_SEED = 50_000;
 const MIN_PROB = 0.02;

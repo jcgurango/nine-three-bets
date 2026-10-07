@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { placeBetAction } from "@/app/actions";
 import { oddsText } from "@/lib/format";
-import { quote } from "@/lib/odds";
+import { PROVIDED_WEIGHT, quote } from "@/lib/odds";
 import { outcomeLabel, outcomeSide } from "@/lib/outcomes";
 import { KIND_LABEL, type BetView, type Market, type Match, type Side } from "@/lib/types";
 import { Credits } from "./Credits";
@@ -348,11 +348,14 @@ function BetSlip({
           </span>
         ) : stake > 0 && q ? (
           <>
-            Your odds for this stake: <b className="text-bone">{oddsText(q.odds)}</b>. Pays{" "}
+            {PROVIDED_WEIGHT < 1 ? "Your odds for this stake: " : "Odds: "}
+            <b className="text-bone">{oddsText(q.odds)}</b>. Pays{" "}
             <Credits n={q.payout} className="font-bold text-bone" /> if it comes in. Odds lock in when you bet.
           </>
-        ) : (
+        ) : PROVIDED_WEIGHT < 1 ? (
           <>Bigger stakes move the line, so your odds depend on how much you bet.</>
+        ) : (
+          <>Odds lock in when you bet.</>
         )}
       </p>
     </form>

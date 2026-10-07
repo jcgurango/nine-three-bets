@@ -140,18 +140,23 @@ results arrive within that window.
 
 ## How odds work
 
-The price of each outcome is a blend, set in `src/lib/odds.ts`:
+Prices come from the provided odds with the bookmaker margin normalized out,
+so the implied probabilities of a market's outcomes add up to 1. Two constants
+in `src/lib/odds.ts` control whether user bets also move the line:
 
-- `PROVIDED_WEIGHT` (0.5): half comes from the admin-entered odds, with the
-  bookmaker margin normalized out, and half from the share of credits users have
-  staked on each outcome.
-- `POOL_SEED` (50,000): virtual credits placed in each pool at the provided
-  odds, so early bets nudge the line instead of swinging it. Lower it to make
-  user bets move the line faster.
+- `PROVIDED_WEIGHT` (currently 1): the share of the price that comes from the
+  provided odds. At 1, user bets don't move the line at all. At 0.5, half the
+  price comes from the share of credits users have staked on each outcome.
+- `POOL_SEED` (50,000): only used when `PROVIDED_WEIGHT` is below 1. Virtual
+  credits placed in each pool at the provided odds, so early bets nudge the
+  line instead of swinging it.
 
-A bet's odds are fixed when it is placed and are the odds *after* its own stake
-is counted, so a large bet gets a slightly worse price than the one displayed.
-That also means nobody can move the line with one bet and back the other
-outcomes for a guaranteed profit. If the price worsens by more than 3% between a player
-seeing it and the bet arriving, the bet is rejected and they are shown the new
-odds.
+Changing these only affects prices quoted from then on: every bet keeps the
+odds and payout it was placed at.
+
+A bet's odds are fixed when it is placed. When user bets move the line, a bet
+is priced at the odds *after* its own stake is counted, so a large bet gets a
+slightly worse price than the one displayed and nobody can move the line with
+one bet and back the other outcomes for a guaranteed profit. If the price
+worsens by more than 3% between a player seeing it and the bet arriving, the
+bet is rejected and they are shown the new odds.
