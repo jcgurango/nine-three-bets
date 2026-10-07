@@ -123,9 +123,10 @@ async function init(): Promise<Client> {
   await addColumn(client, "matches", "finalized_at", "INTEGER");
   // Extra wording on a result, e.g. how much of a win went to a loan.
   await addColumn(client, "events_v2", "note", "TEXT");
-  await client.execute(
-    "CREATE UNIQUE INDEX IF NOT EXISTS matches_external_id ON matches(external_id)",
-  );
+  // Not unique: an archived match keeps its id, and a later match (a rematch,
+  // or one re-created after an early archive) may carry the same one.
+  await client.execute("DROP INDEX IF EXISTS matches_external_id");
+  await client.execute("CREATE INDEX IF NOT EXISTS matches_external ON matches(external_id)");
   await migrateToV2(client);
   await backfillLedger(client);
   return client;

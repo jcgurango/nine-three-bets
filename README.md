@@ -129,8 +129,10 @@ array of them):
 }
 ```
 
-**Which match.** A match is recognised by `matchId` once it has been seen. The
-first time, it is matched to an active match by team names, in either order;
+**Which match.** A match is recognised by `matchId` once it has been seen,
+as long as it isn't archived: archived matches are never updated, whatever
+the id. Otherwise it is matched to an active match by team names, in either
+order;
 "G2" matches "G2 Esports" and "100T" matches "100 Thieves", but abbreviations
 like "FNC" for "Fnatic" do not. If nothing fits, a new match is created from
 the scraped teams and tournament, with its length taken from the scores on

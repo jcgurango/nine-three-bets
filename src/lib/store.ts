@@ -956,8 +956,9 @@ export interface IngestResult {
  * is none), then set the provided odds on each market it has prices for.
  * Markets are never opened, closed or paid out from here.
  *
- * The match is found by the scraped site's id if we've seen it before,
- * otherwise by team names among the active matches, in either order.
+ * The match is found by the scraped site's id if an active match carries it,
+ * otherwise by team names among the active matches, in either order. Archived
+ * matches are never touched.
  */
 export async function ingestScrape(scrape: ParsedScrape): Promise<IngestResult> {
   return writeTx(async (tx) => {
@@ -965,9 +966,11 @@ export async function ingestScrape(scrape: ParsedScrape): Promise<IngestResult> 
     let flipped = false;
     let created = false;
 
+    // Archived matches are off the board for good: a scrape for one, even with
+    // the same id, goes to an active match with those teams or a new one.
     if (scrape.externalId) {
       const rs = await tx.execute({
-        sql: "SELECT * FROM matches WHERE external_id = ?",
+        sql: "SELECT * FROM matches WHERE external_id = ? AND archived = 0 ORDER BY id DESC",
         args: [scrape.externalId],
       });
       row = rs.rows[0];
