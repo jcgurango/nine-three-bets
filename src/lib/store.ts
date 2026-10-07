@@ -816,20 +816,8 @@ export async function placeBet(input: {
   });
 }
 
-export async function listUserBets(userId: string, limit = 300): Promise<BetView[]> {
-  const db = await getDb();
-  const rs = await db.execute({
-    sql: `SELECT b.id, b.market_id, b.pick, b.stake, b.odds, b.payout, b.status, b.created_at,
-                 m.match_id, m.map_number, m.kind,
-                 x.label, x.team_a, x.team_b, x.map_names
-          FROM bets_v2 b
-          JOIN markets_v2 m ON m.id = b.market_id
-          JOIN matches x ON x.id = m.match_id
-          WHERE b.user_id = ?
-          ORDER BY b.id DESC LIMIT ?`,
-    args: [userId, limit],
-  });
-  return rs.rows.map((r) => ({
+function toBetView(r: Row): BetView {
+  return {
     id: Number(r.id),
     marketId: Number(r.market_id),
     matchId: Number(r.match_id),
@@ -845,6 +833,42 @@ export async function listUserBets(userId: string, limit = 300): Promise<BetView
     payout: Number(r.payout),
     status: r.status as BetStatus,
     createdAt: Number(r.created_at),
+  };
+}
+
+export async function listUserBets(userId: string, limit = 300): Promise<BetView[]> {
+  const db = await getDb();
+  const rs = await db.execute({
+    sql: `SELECT b.id, b.market_id, b.pick, b.stake, b.odds, b.payout, b.status, b.created_at,
+                 m.match_id, m.map_number, m.kind,
+                 x.label, x.team_a, x.team_b, x.map_names
+          FROM bets_v2 b
+          JOIN markets_v2 m ON m.id = b.market_id
+          JOIN matches x ON x.id = m.match_id
+          WHERE b.user_id = ?
+          ORDER BY b.id DESC LIMIT ?`,
+    args: [userId, limit],
+  });
+  return rs.rows.map(toBetView);
+}
+
+/** Every bet ever placed, oldest first, with the player's nickname. For the CSV export. */
+export async function listAllBets(): Promise<(BetView & { nickname: string | null })[]> {
+  const db = await getDb();
+  const rs = await db.execute(
+    `SELECT b.id, b.market_id, b.pick, b.stake, b.odds, b.payout, b.status, b.created_at,
+            m.match_id, m.map_number, m.kind,
+            x.label, x.team_a, x.team_b, x.map_names,
+            u.nickname
+     FROM bets_v2 b
+     JOIN markets_v2 m ON m.id = b.market_id
+     JOIN matches x ON x.id = m.match_id
+     JOIN users u ON u.id = b.user_id
+     ORDER BY b.id`,
+  );
+  return rs.rows.map((r) => ({
+    ...toBetView(r),
+    nickname: r.nickname == null ? null : String(r.nickname),
   }));
 }
 

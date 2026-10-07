@@ -79,7 +79,12 @@ export function AdminPanel({ active, archived }: { active: Match[]; archived: Ma
   return (
     <div className="space-y-8">
       <section>
-        <h1 className="font-display text-2xl font-bold uppercase tracking-wide">Admin</h1>
+        <div className="flex flex-wrap items-baseline gap-4">
+          <h1 className="font-display text-2xl font-bold uppercase tracking-wide">Admin</h1>
+          <a href="/admin/bets.csv" className="text-sm text-gold hover:underline" download>
+            Download all bets (CSV)
+          </a>
+        </div>
         <ol className="mt-2 list-inside list-decimal space-y-0.5 text-sm text-mute">
           <li>Add the match, then type in the odds from your source for each map and save.</li>
           <li>Open the markets to take bets. Close each one when its map or round starts.</li>
