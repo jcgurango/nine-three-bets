@@ -51,6 +51,8 @@ export interface Outcome {
   odds: number | null;
   /** Total credits users have staked on this outcome. */
   stake: number;
+  /** Ruled out by the map results so far (a score that can no longer happen). Bets on it have lost. */
+  eliminated: boolean;
 }
 
 export interface Market {
@@ -63,6 +65,8 @@ export interface Market {
   outcomes: Outcome[];
   /** Key of the winning outcome once paid out. */
   result: string | null;
+  /** Paid out by the site itself because the map results decided it, not by an admin. */
+  autoSettled: boolean;
 }
 
 export interface Match {

@@ -403,6 +403,11 @@ function AdminGroup({
                 <span className={`w-16 rounded px-1.5 py-0.5 text-center text-xs font-bold uppercase ${STATUS_STYLE[m.status]}`}>
                   {m.status}
                 </span>
+                {m.autoSettled && (
+                  <span className="text-xs text-mute" title="Paid out by the site from the map results">
+                    automatic
+                  </span>
+                )}
                 <span className="ml-auto flex flex-wrap gap-1.5">
                   {(m.status === "draft" || m.status === "closed") && (
                     <button className={btn} disabled={pending} onClick={() => act(() => setMarketOpenAction(m.id, true))}>
@@ -434,7 +439,10 @@ function AdminGroup({
                     <div key={o.key} className="flex items-center gap-2 text-xs text-mute">
                       <label className="flex items-center gap-2">
                         <span
-                          className={`w-28 truncate ${outcomeSide(o.key) === "a" ? "text-val" : "text-teal"}`}
+                          className={`w-28 truncate ${
+                            o.eliminated ? "line-through" : outcomeSide(o.key) === "a" ? "text-val" : "text-teal"
+                          }`}
+                          title={o.eliminated ? "No longer possible after the map results" : undefined}
                         >
                           {label}
                         </span>
@@ -443,18 +451,18 @@ function AdminGroup({
                           step="0.01"
                           min="1.01"
                           placeholder="odds"
-                          disabled={locked}
+                          disabled={locked || o.eliminated}
                           className={`${input} w-20 font-mono disabled:opacity-50`}
                           value={shown(m, o.key, o.odds)}
                           onChange={(e) => setOne(m.id, o.key, e.target.value)}
                         />
                       </label>
                       <span className="min-w-32 flex-1">
-                        {q ? <>Live {oddsText(q.odds)} · </> : null}
+                        {o.eliminated ? "Out · " : q ? <>Live {oddsText(q.odds)} · </> : null}
                         <Credits n={o.stake} /> staked
                       </span>
                       {m.result === o.key && <span className="font-bold uppercase text-gold">Won</span>}
-                      {canSettle && (
+                      {canSettle && !o.eliminated && (
                         <ConfirmButton
                           disabled={pending}
                           onConfirm={() => act(() => settleMarketAction(m.id, o.key))}

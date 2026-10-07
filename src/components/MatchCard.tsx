@@ -25,7 +25,9 @@ const VISIBLE = new Set(["open", "closed", "settled"]);
 /** Odds buttons per row, by number of outcomes: pairs side by side, scores in a tidy grid. */
 const GRID: Record<number, string> = {
   2: "grid-cols-2",
+  3: "grid-cols-2 md:grid-cols-3",
   4: "grid-cols-2 md:grid-cols-4",
+  5: "grid-cols-2 md:grid-cols-3",
   6: "grid-cols-2 md:grid-cols-3",
 };
 
@@ -41,7 +43,9 @@ export function MatchCard({
   balance: number | null;
 }) {
   const [selection, setSelection] = useState<Selection | null>(null);
-  const markets = match.markets.filter((m) => VISIBLE.has(m.status) && quote(m.outcomes, m.outcomes[0]?.key));
+  const markets = match.markets.filter(
+    (m) => VISIBLE.has(m.status) && m.outcomes.some((o) => quote(m.outcomes, o.key)),
+  );
   // Map number 0 holds the match-level markets, so it sorts to the top.
   const groups = [...new Set(markets.map((m) => m.mapNumber))].sort((x, y) => x - y);
   const anyOpen = markets.some((m) => m.status === "open");
@@ -126,6 +130,8 @@ function MarketRow({
   const open = market.status === "open";
   const label = (key: string) => outcomeLabel(key, match.teamA, match.teamB);
   const isScore = market.kind === "score";
+  // Scores the map results have ruled out come off the board.
+  const live = market.outcomes.filter((o) => !o.eliminated);
 
   return (
     <div className="px-4 py-3">
@@ -139,8 +145,8 @@ function MarketRow({
           )}
         </div>
         <div className="flex-1">
-          <div className={`grid gap-2 ${GRID[market.outcomes.length] ?? "grid-cols-2"}`}>
-            {market.outcomes.map(({ key }) => {
+          <div className={`grid gap-2 ${GRID[live.length] ?? "grid-cols-2"}`}>
+            {live.map(({ key }) => {
               const side = outcomeSide(key);
               const won = market.result === key;
               const lost = market.result != null && !won;
@@ -187,11 +193,11 @@ function MarketRow({
           </div>
           <div
             className="mt-2 flex h-1 gap-px overflow-hidden rounded-full"
-            title={market.outcomes
+            title={live
               .map(({ key }) => `${Math.round(quote(market.outcomes, key)!.prob * 100)}% ${label(key)}`)
               .join(" / ")}
           >
-            {market.outcomes.map(({ key }) => (
+            {live.map(({ key }) => (
               <div
                 key={key}
                 className={`transition-[flex-grow] duration-500 ${SIDE_BAR[outcomeSide(key)]}`}
@@ -220,7 +226,9 @@ function MarketRow({
               <span className={SIDE_TEXT[outcomeSide(b.pick)]}>{label(b.pick)}</span> @ {oddsText(b.odds)}
               {b.status === "pending" && <> → pays <Credits n={b.payout} /></>}
               {b.status === "won" && <span className="text-gold"> · won <Credits n={b.payout} /></span>}
-              {b.status === "lost" && <> · lost</>}
+              {b.status === "lost" && (
+                <> · {market.outcomes.find((o) => o.key === b.pick)?.eliminated ? "no longer possible" : "lost"}</>
+              )}
               {b.status === "refunded" && <> · refunded</>}
             </li>
           ))}

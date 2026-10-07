@@ -29,7 +29,7 @@ export interface Quote {
  * margin normalized out. Null if any outcome is missing odds.
  */
 export function providedProbs(outcomes: Outcome[]): number[] | null {
-  if (outcomes.length < 2 || outcomes.some((o) => !o.odds || o.odds <= 1)) return null;
+  if (outcomes.length < 1 || outcomes.some((o) => !o.odds || o.odds <= 1)) return null;
   const implied = outcomes.map((o) => 1 / o.odds!);
   const total = implied.reduce((a, b) => a + b, 0);
   return implied.map((p) => p / total);
@@ -41,7 +41,9 @@ export function providedProbs(outcomes: Outcome[]): number[] | null {
  * bets and then taking the other outcomes is never risk-free. `stake = 0`
  * gives the displayed (marginal) odds.
  */
-export function quote(outcomes: Outcome[], pick: string, stake = 0): Quote | null {
+export function quote(all: Outcome[], pick: string, stake = 0): Quote | null {
+  // Outcomes ruled out by map results drop out of the market: the rest share the probability.
+  const outcomes = all.filter((o) => !o.eliminated);
   const provided = providedProbs(outcomes);
   const index = outcomes.findIndex((o) => o.key === pick);
   if (!provided || index < 0) return null;

@@ -95,6 +95,9 @@ async function init(): Promise<Client> {
   await addColumn(client, "matches", "external_id", "TEXT");
   await addColumn(client, "matches", "external_flipped", "INTEGER NOT NULL DEFAULT 0");
   await addColumn(client, "matches", "scraped_at", "INTEGER");
+  // Correct scores ruled out by map results, and markets the site paid out by itself.
+  await addColumn(client, "outcomes", "eliminated", "INTEGER NOT NULL DEFAULT 0");
+  await addColumn(client, "markets_v2", "auto_settled", "INTEGER NOT NULL DEFAULT 0");
   await client.execute(
     "CREATE UNIQUE INDEX IF NOT EXISTS matches_external_id ON matches(external_id)",
   );

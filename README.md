@@ -63,10 +63,16 @@ backup.
 4. **Close** each market when its map or round starts, and the full-match
    markets when the match starts.
 5. **Pay out** by clicking **Won** next to the result (asks for a second
-   click). Each market is paid out on its own, so finishing a match means
-   paying out both the match winner and the correct score. **Void** refunds
-   every stake, for example on a map 3 that is never played. Both can be undone.
-6. **Archive** the match to take it off the home page.
+   click). Map results drive the full-match markets: once a map is paid out,
+   correct scores that can no longer happen come off the board and bets on
+   them lose, and when the series is decided the correct score and match
+   winner are paid out automatically (marked "automatic" in admin). Pistol
+   markets are always paid out by hand. **Void** refunds every stake, for
+   example on a map 3 that is never played.
+6. **Undo** reverses a payout or void. Undoing a map result also brings back
+   the scores it ruled out and reopens anything it paid out automatically; those
+   markets come back closed, so reopen them if betting should continue.
+7. **Archive** the match to take it off the home page.
 
 ## Scraped odds (`POST /ingest`)
 

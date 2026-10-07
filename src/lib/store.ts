@@ -39,6 +39,7 @@ function toOutcome(r: Row): Outcome {
     key: String(r.key),
     odds: r.odds == null ? null : Number(r.odds),
     stake: Number(r.stake),
+    eliminated: Number(r.eliminated) === 1,
   };
 }
 
@@ -158,6 +159,7 @@ export async function listMatches(archived: boolean): Promise<Match[]> {
       status: r.status as MarketStatus,
       outcomes: outcomesByMarket.get(Number(r.id)) ?? [],
       result: r.result == null ? null : String(r.result),
+      autoSettled: Number(r.auto_settled) === 1,
     };
     marketsByMatch.set(market.matchId, [...(marketsByMatch.get(market.matchId) ?? []), market]);
   }
@@ -271,9 +273,10 @@ export interface OddsInput {
   odds: Record<string, number | null>;
 }
 
-/** A market can only take bets once every outcome has provided odds. */
+/** A market can only take bets once every outcome still on the board has provided odds. */
 const HAS_ALL_ODDS = `NOT EXISTS (
-  SELECT 1 FROM outcomes WHERE outcomes.market_id = markets_v2.id AND outcomes.odds IS NULL)`;
+  SELECT 1 FROM outcomes
+  WHERE outcomes.market_id = markets_v2.id AND outcomes.odds IS NULL AND outcomes.eliminated = 0)`;
 
 /**
  * Save the provided odds for one group of a match's markets: a map (with its
@@ -307,11 +310,11 @@ export async function saveOdds(
         sql: "SELECT status FROM markets_v2 WHERE id = ? AND match_id = ? AND map_number = ?",
         args: [o.marketId, matchId, mapNumber],
       });
-      const status = cur.rows[0]?.status;
+      const status = String(cur.rows[0]?.status);
       // Settled and voided markets keep the odds they were priced with.
-      if (status !== "draft" && status !== "open" && status !== "closed") continue;
+      if (!UNSETTLED.includes(status)) continue;
       const keys = await tx.execute({
-        sql: "SELECT key FROM outcomes WHERE market_id = ?",
+        sql: "SELECT key FROM outcomes WHERE market_id = ? AND eliminated = 0",
         args: [o.marketId],
       });
       const values = keys.rows.map((r) => o.odds[String(r.key)] ?? null);
@@ -377,45 +380,198 @@ export async function bulkSetOpen(
   return rs.rowsAffected;
 }
 
+const UNSETTLED = ["draft", "open", "closed"];
+
+/** Settle a market: pay out bets on `result`, mark the rest lost. Bets on eliminated outcomes are already lost. */
+async function settleInTx(tx: Transaction, marketId: number, result: string, auto: boolean) {
+  const rs = await tx.execute({
+    sql: `SELECT m.status, o.key FROM markets_v2 m
+          LEFT JOIN outcomes o ON o.market_id = m.id AND o.key = ? AND o.eliminated = 0
+          WHERE m.id = ?`,
+    args: [result, marketId],
+  });
+  const status = String(rs.rows[0]?.status);
+  // An admin pays out what was open for betting; the automatic settlement of a decided series may also close a draft.
+  if (status !== "open" && status !== "closed" && !(auto && status === "draft")) {
+    throw new UserError("Only open or closed markets can be paid out.");
+  }
+  if (rs.rows[0].key == null) throw new UserError("That isn't one of this market's possible outcomes.");
+  await tx.execute({
+    sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
+          SELECT user_id, id,
+                 CASE WHEN pick = ? THEN 'won' ELSE 'lost' END,
+                 CASE WHEN pick = ? THEN payout ELSE -stake END
+          FROM bets_v2 WHERE market_id = ? AND status = 'pending'`,
+    args: [result, result, marketId],
+  });
+  await tx.execute({
+    sql: `UPDATE users SET balance = balance + (
+            SELECT SUM(payout) FROM bets_v2
+            WHERE bets_v2.user_id = users.id AND market_id = ? AND pick = ? AND status = 'pending')
+          WHERE id IN (
+            SELECT user_id FROM bets_v2 WHERE market_id = ? AND pick = ? AND status = 'pending')`,
+    args: [marketId, result, marketId, result],
+  });
+  await tx.execute({
+    sql: `UPDATE bets_v2 SET status = CASE WHEN pick = ? THEN 'won' ELSE 'lost' END
+          WHERE market_id = ? AND status = 'pending'`,
+    args: [result, marketId],
+  });
+  await tx.execute({
+    sql: "UPDATE markets_v2 SET status = 'settled', result = ?, auto_settled = ? WHERE id = ?",
+    args: [result, auto ? 1 : 0, marketId],
+  });
+}
+
+/**
+ * Reverse a payout or a void: claw the credits back and put the bets back to
+ * pending, except bets on eliminated outcomes, which stay lost. The market
+ * returns to closed, or draft if it never had odds.
+ */
+async function unsettleInTx(tx: Transaction, marketId: number) {
+  const rs = await tx.execute({
+    sql: `SELECT status, ${HAS_ALL_ODDS} AS priced FROM markets_v2 WHERE id = ?`,
+    args: [marketId],
+  });
+  const status = rs.rows[0]?.status;
+  if (status !== "settled" && status !== "void") {
+    throw new UserError("That market hasn't been paid out or voided.");
+  }
+  const [betStatus, column] = status === "settled" ? ["won", "payout"] : ["refunded", "stake"];
+  const live = `pick NOT IN (SELECT key FROM outcomes WHERE outcomes.market_id = bets_v2.market_id AND eliminated = 1)`;
+  await tx.execute({
+    sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
+          SELECT user_id, id, 'reversed',
+                 CASE status WHEN 'won' THEN -payout WHEN 'refunded' THEN -stake ELSE 0 END
+          FROM bets_v2 WHERE market_id = ? AND status != 'pending' AND ${live}`,
+    args: [marketId],
+  });
+  await tx.execute({
+    sql: `UPDATE users SET balance = balance - (
+            SELECT SUM(${column}) FROM bets_v2
+            WHERE bets_v2.user_id = users.id AND market_id = ? AND status = ? AND ${live})
+          WHERE id IN (SELECT user_id FROM bets_v2 WHERE market_id = ? AND status = ? AND ${live})`,
+    args: [marketId, betStatus, marketId, betStatus],
+  });
+  await tx.execute({
+    sql: `UPDATE bets_v2 SET status = 'pending' WHERE market_id = ? AND status != 'pending' AND ${live}`,
+    args: [marketId],
+  });
+  await tx.execute({
+    sql: "UPDATE markets_v2 SET status = ?, result = NULL, auto_settled = 0 WHERE id = ?",
+    args: [Number(rs.rows[0].priced) ? "closed" : "draft", marketId],
+  });
+}
+
+/** Take an outcome off the board: pending bets on it lose now. Safe to repeat. */
+async function eliminateOutcome(tx: Transaction, marketId: number, key: string) {
+  await tx.execute({
+    sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
+          SELECT user_id, id, 'lost', -stake FROM bets_v2
+          WHERE market_id = ? AND pick = ? AND status = 'pending'`,
+    args: [marketId, key],
+  });
+  await tx.execute({
+    sql: "UPDATE bets_v2 SET status = 'lost' WHERE market_id = ? AND pick = ? AND status = 'pending'",
+    args: [marketId, key],
+  });
+  await tx.execute({
+    sql: "UPDATE outcomes SET eliminated = 1 WHERE market_id = ? AND key = ?",
+    args: [marketId, key],
+  });
+}
+
+/** Put an eliminated outcome back (a map result was undone): its lost bets are open again. */
+async function restoreOutcome(tx: Transaction, marketId: number, key: string) {
+  await tx.execute({
+    sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
+          SELECT user_id, id, 'reversed', 0 FROM bets_v2
+          WHERE market_id = ? AND pick = ? AND status = 'lost'`,
+    args: [marketId, key],
+  });
+  await tx.execute({
+    sql: "UPDATE bets_v2 SET status = 'pending' WHERE market_id = ? AND pick = ? AND status = 'lost'",
+    args: [marketId, key],
+  });
+  await tx.execute({
+    sql: "UPDATE outcomes SET eliminated = 0 WHERE market_id = ? AND key = ?",
+    args: [marketId, key],
+  });
+}
+
+/**
+ * Bring the match-level markets in line with the map results so far. Correct
+ * scores that can no longer happen are eliminated (bets on them lose), and
+ * once only one score is left, or a team has won enough maps, the correct
+ * score and match winner are paid out automatically. Undoing a map result
+ * reverses all of that. Markets an admin paid out or voided by hand are left
+ * alone.
+ */
+async function syncSeries(tx: Transaction, matchId: number) {
+  const match = await tx.execute({ sql: "SELECT best_of FROM matches WHERE id = ?", args: [matchId] });
+  const toWin = Math.ceil(Number(match.rows[0].best_of) / 2);
+  const maps = await tx.execute({
+    sql: "SELECT result FROM markets_v2 WHERE match_id = ? AND kind = 'map' AND status = 'settled'",
+    args: [matchId],
+  });
+  const won = { a: 0, b: 0 };
+  for (const r of maps.rows) won[r.result as "a" | "b"]++;
+  const decided = won.a >= toWin ? "a" : won.b >= toWin ? "b" : null;
+  // A score is still possible if neither team has lost more maps than it shows,
+  // and once a team has won the series the score is simply the maps so far.
+  const viable = (key: string) => {
+    const [a, b] = key.split("-").map(Number);
+    return decided ? a === won.a && b === won.b : a >= won.a && b >= won.b;
+  };
+
+  const level = await tx.execute({
+    sql: "SELECT id, kind, status, result, auto_settled FROM markets_v2 WHERE match_id = ? AND map_number = 0",
+    args: [matchId],
+  });
+  for (const m of level.rows) {
+    const id = Number(m.id);
+    let status = String(m.status);
+    if (status === "void" || (status === "settled" && !Number(m.auto_settled))) continue;
+
+    if (m.kind === "score") {
+      const outcomes = (await tx.execute({ sql: "SELECT key, eliminated FROM outcomes WHERE market_id = ?", args: [id] })).rows;
+      const live = outcomes.filter((o) => viable(String(o.key))).map((o) => String(o.key));
+      if (status === "settled" && !(live.length === 1 && live[0] === m.result)) {
+        await unsettleInTx(tx, id);
+        status = "closed";
+      }
+      if (status !== "settled") {
+        for (const o of outcomes) {
+          if (!viable(String(o.key))) await eliminateOutcome(tx, id, String(o.key));
+          else if (Number(o.eliminated)) await restoreOutcome(tx, id, String(o.key));
+        }
+        if (live.length === 1) await settleInTx(tx, id, live[0], true);
+      }
+    } else if (m.kind === "match") {
+      if (status === "settled" && m.result !== decided) {
+        await unsettleInTx(tx, id);
+        status = "closed";
+      }
+      if (status !== "settled" && decided) await settleInTx(tx, id, decided, true);
+    }
+  }
+}
+
+/** The match a market belongs to, if it is a map winner (whose result shapes the match-level markets). */
+async function seriesOf(tx: Transaction, marketId: number): Promise<number | null> {
+  const rs = await tx.execute({
+    sql: "SELECT match_id FROM markets_v2 WHERE id = ? AND kind = 'map'",
+    args: [marketId],
+  });
+  return rs.rows[0] ? Number(rs.rows[0].match_id) : null;
+}
+
 /** Close the market (if needed), record the winning outcome and pay out winning bets. */
 export async function settleMarket(marketId: number, result: string): Promise<void> {
   await writeTx(async (tx) => {
-    const rs = await tx.execute({
-      sql: `SELECT m.status, o.key FROM markets_v2 m
-            LEFT JOIN outcomes o ON o.market_id = m.id AND o.key = ?
-            WHERE m.id = ?`,
-      args: [result, marketId],
-    });
-    const status = rs.rows[0]?.status;
-    if (status !== "open" && status !== "closed") {
-      throw new UserError("Only open or closed markets can be paid out.");
-    }
-    if (rs.rows[0].key == null) throw new UserError("That isn't one of this market's outcomes.");
-    await tx.execute({
-      sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
-            SELECT user_id, id,
-                   CASE WHEN pick = ? THEN 'won' ELSE 'lost' END,
-                   CASE WHEN pick = ? THEN payout ELSE -stake END
-            FROM bets_v2 WHERE market_id = ? AND status = 'pending'`,
-      args: [result, result, marketId],
-    });
-    await tx.execute({
-      sql: `UPDATE users SET balance = balance + (
-              SELECT SUM(payout) FROM bets_v2
-              WHERE bets_v2.user_id = users.id AND market_id = ? AND pick = ? AND status = 'pending')
-            WHERE id IN (
-              SELECT user_id FROM bets_v2 WHERE market_id = ? AND pick = ? AND status = 'pending')`,
-      args: [marketId, result, marketId, result],
-    });
-    await tx.execute({
-      sql: `UPDATE bets_v2 SET status = CASE WHEN pick = ? THEN 'won' ELSE 'lost' END
-            WHERE market_id = ? AND status = 'pending'`,
-      args: [result, marketId],
-    });
-    await tx.execute({
-      sql: "UPDATE markets_v2 SET status = 'settled', result = ? WHERE id = ?",
-      args: [result, marketId],
-    });
+    await settleInTx(tx, marketId, result, false);
+    const matchId = await seriesOf(tx, marketId);
+    if (matchId != null) await syncSeries(tx, matchId);
   });
   wakeEventStreams();
 }
@@ -427,8 +583,7 @@ export async function voidMarket(marketId: number): Promise<void> {
       sql: "SELECT status FROM markets_v2 WHERE id = ?",
       args: [marketId],
     });
-    const status = rs.rows[0]?.status;
-    if (status !== "draft" && status !== "open" && status !== "closed") {
+    if (!UNSETTLED.includes(String(rs.rows[0]?.status))) {
       throw new UserError("Only unsettled markets can be voided.");
     }
     await tx.execute({
@@ -449,7 +604,7 @@ export async function voidMarket(marketId: number): Promise<void> {
       args: [marketId],
     });
     await tx.execute({
-      sql: "UPDATE markets_v2 SET status = 'void', result = NULL WHERE id = ?",
+      sql: "UPDATE markets_v2 SET status = 'void', result = NULL, auto_settled = 0 WHERE id = ?",
       args: [marketId],
     });
   });
@@ -457,48 +612,28 @@ export async function voidMarket(marketId: number): Promise<void> {
 }
 
 /**
- * Undo a payout or a void: claw the credits back, put the bets back to
- * pending and return the market to closed (or draft if it never had odds).
- * Balances can go negative if a user has already re-staked the winnings.
+ * Undo a payout or a void. Balances can go negative if a user has already
+ * re-staked the winnings. Undoing a map result also brings back any correct
+ * scores it had ruled out and reopens anything it settled automatically.
  */
 export async function unsettleMarket(marketId: number): Promise<void> {
   await writeTx(async (tx) => {
-    const rs = await tx.execute({
-      sql: `SELECT status, ${HAS_ALL_ODDS} AS priced FROM markets_v2 WHERE id = ?`,
-      args: [marketId],
-    });
-    const status = rs.rows[0]?.status;
-    if (status !== "settled" && status !== "void") {
-      throw new UserError("That market hasn't been paid out or voided.");
-    }
-    const [betStatus, column] = status === "settled" ? ["won", "payout"] : ["refunded", "stake"];
-    await tx.execute({
-      sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
-            SELECT user_id, id, 'reversed',
-                   CASE status WHEN 'won' THEN -payout WHEN 'refunded' THEN -stake ELSE 0 END
-            FROM bets_v2 WHERE market_id = ? AND status != 'pending'`,
-      args: [marketId],
-    });
-    await tx.execute({
-      sql: `UPDATE users SET balance = balance - (
-              SELECT SUM(${column}) FROM bets_v2
-              WHERE bets_v2.user_id = users.id AND market_id = ? AND status = ?)
-            WHERE id IN (SELECT user_id FROM bets_v2 WHERE market_id = ? AND status = ?)`,
-      args: [marketId, betStatus, marketId, betStatus],
-    });
-    await tx.execute({
-      sql: "UPDATE bets_v2 SET status = 'pending' WHERE market_id = ? AND status != 'pending'",
-      args: [marketId],
-    });
-    await tx.execute({
-      sql: "UPDATE markets_v2 SET status = ?, result = NULL WHERE id = ?",
-      args: [Number(rs.rows[0].priced) ? "closed" : "draft", marketId],
-    });
+    await unsettleInTx(tx, marketId);
+    const matchId = await seriesOf(tx, marketId);
+    if (matchId != null) await syncSeries(tx, matchId);
   });
   wakeEventStreams();
 }
 
 // ---------------------------------------------------------------- scraped odds
+
+/** Whether a scraped outcome key that we don't list could be one of ours that's been eliminated. */
+function viableKeyShape(key: string, live: string[]): boolean {
+  const score = /^(\d+)-(\d+)$/.exec(key);
+  if (!score) return live.includes(key);
+  const toWin = Math.max(...live.flatMap((k) => k.split("-").map(Number)));
+  return Math.max(Number(score[1]), Number(score[2])) === toWin;
+}
 
 export interface IngestResult {
   match: {
@@ -590,13 +725,15 @@ export async function ingestScrape(scrape: ParsedScrape): Promise<IngestResult> 
         skip(target.status === "settled" ? "already paid out" : "voided");
         continue;
       }
+      // Outcomes already ruled out by map results are ignored; the rest must all be priced.
       const keys = (
         await tx.execute({
-          sql: "SELECT key FROM outcomes WHERE market_id = ? ORDER BY position",
+          sql: "SELECT key FROM outcomes WHERE market_id = ? AND eliminated = 0 ORDER BY position",
           args: [target.id],
         })
       ).rows.map((r) => String(r.key));
-      if (keys.length !== Object.keys(odds).length || keys.some((k) => !(k in odds))) {
+      const extra = Object.keys(odds).filter((k) => !keys.includes(k));
+      if (keys.some((k) => !(k in odds)) || extra.some((k) => !viableKeyShape(k, keys))) {
         skip(`outcomes don't match this best of ${row.best_of} (expected ${keys.join(", ")})`);
         continue;
       }
@@ -653,7 +790,11 @@ export async function placeBet(input: {
     if (!ur.rows[0]) throw new UserError("Account not found. Log in again.");
     if (stake > Number(ur.rows[0].balance)) throw new UserError("You don't have enough credits.");
 
-    const q = quote(or.rows.map(toOutcome), pick, stake);
+    const outcomes = or.rows.map(toOutcome);
+    if (outcomes.find((o) => o.key === pick)?.eliminated) {
+      throw new UserError("That result is no longer possible.");
+    }
+    const q = quote(outcomes, pick, stake);
     if (!q) throw new UserError("Betting is closed on this market.");
     if (q.odds < quotedOdds * (1 - SLIPPAGE_TOLERANCE)) {
       throw new UserError(`The odds moved to ${q.odds.toFixed(2)}. Check the new price and try again.`);
