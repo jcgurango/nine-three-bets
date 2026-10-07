@@ -123,6 +123,8 @@ that sends it: a page on this site, a browser extension with permission for
 this site, or a script that passes the cookie itself. A `fetch` run inside the
 bookmaker's page will arrive without it and get a 401.
 
+The scraper script for GGBet is at scraper.js - use it with greasemonkey et al.
+
 ## Live results
 
 Each logged-in browser holds a server-sent events connection to `/api/events`.
