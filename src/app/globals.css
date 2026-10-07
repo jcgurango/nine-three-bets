@@ -318,3 +318,24 @@ input[type="number"]::-webkit-outer-spin-button {
     animation-iteration-count: 1;
   }
 }
+
+/* ---------------------------------------------------------------- loan desk */
+
+.loan-desk {
+  box-shadow: 0 0 24px rgb(245 192 74 / 0.25), inset 0 0 40px rgb(245 192 74 / 0.06);
+  animation: loan-glow 1.6s ease-in-out infinite alternate;
+}
+@keyframes loan-glow {
+  from { box-shadow: 0 0 12px rgb(245 192 74 / 0.15), inset 0 0 40px rgb(245 192 74 / 0.04); }
+  to { box-shadow: 0 0 32px rgb(245 192 74 / 0.45), inset 0 0 40px rgb(245 192 74 / 0.1); }
+}
+.loan-blink { animation: loan-blink 0.9s steps(2, start) infinite; }
+@keyframes loan-blink { to { visibility: hidden; } }
+.loan-button:not(:disabled) { animation: loan-button 0.8s ease-in-out infinite alternate; }
+@keyframes loan-button {
+  from { transform: scale(1); }
+  to { transform: scale(1.03); box-shadow: 0 0 18px rgb(245 192 74 / 0.8); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loan-desk, .loan-blink, .loan-button:not(:disabled) { animation: none; }
+}

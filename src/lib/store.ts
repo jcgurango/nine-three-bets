@@ -2,14 +2,17 @@ import type { Row, Transaction } from "@libsql/client";
 import { getDb, writeTx, STARTING_BALANCE } from "./db";
 import { UserError } from "./errors";
 import { wakeEventStreams } from "./live";
-import { quote } from "./odds";
+import { MIN_ODDS, isBettable, quote } from "./odds";
 import { TEAM_OUTCOMES, marketLabel, matchLevelMarkets, outcomeLabel } from "./outcomes";
 import { flipOdds, sameTeam, type ParsedScrape, type Skipped } from "./scrape";
 import {
+  DEFAULT_SETTINGS,
   MAP_KINDS,
   type BetStatus,
   type BetView,
   type LeaderboardRow,
+  type LedgerEntry,
+  type LedgerKind,
   type LiveEvent,
   type LiveEventKind,
   type Market,
@@ -17,6 +20,7 @@ import {
   type MarketStatus,
   type Match,
   type Outcome,
+  type Settings,
   type User,
 } from "./types";
 
@@ -31,7 +35,99 @@ function toUser(r: Row): User {
     nickname: r.nickname == null ? null : String(r.nickname),
     avatarUrl: r.avatar_url == null ? null : String(r.avatar_url),
     balance: Number(r.balance),
+    debt: Number(r.debt),
+    borrowed: Number(r.borrowed),
   };
+}
+
+/** Round up: the house never loses a fraction of a credit. */
+const roundUp = (n: number) => Math.ceil(n - 1e-9);
+
+// ---------------------------------------------------------------- ledger
+
+interface Posting {
+  userId: string;
+  kind: LedgerKind;
+  /** Change to the balance. */
+  amount: number;
+  /** Change to what the player owes. */
+  debt?: number;
+  ref?: { type: "bet" | "match"; id: number };
+  note?: string;
+}
+
+/** Record a credit movement and apply it to the player. Every balance change goes through here. */
+async function post(tx: Transaction, p: Posting): Promise<void> {
+  const debt = p.debt ?? 0;
+  if (p.amount === 0 && debt === 0) return;
+  await tx.execute({
+    sql: `INSERT INTO ledger (user_id, kind, amount, debt_delta, ref_type, ref_id, note)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    args: [p.userId, p.kind, p.amount, debt, p.ref?.type ?? null, p.ref?.id ?? null, p.note ?? null],
+  });
+  await tx.execute({
+    sql: `UPDATE users SET balance = balance + ?, debt = debt + ?, borrowed = borrowed + ? WHERE id = ?`,
+    args: [p.amount, debt, p.kind === "loan" ? p.amount : 0, p.userId],
+  });
+}
+
+/** Post the same movement for many players in one statement (results of a `SELECT user_id, amount`). */
+async function postMany(
+  tx: Transaction,
+  kind: LedgerKind,
+  ref: Posting["ref"],
+  select: { sql: string; args: (string | number)[] },
+): Promise<void> {
+  const rows = (await tx.execute(select)).rows;
+  for (const r of rows) {
+    await post(tx, { userId: String(r.user_id), kind, amount: Number(r.amount), ref });
+  }
+}
+
+export async function listLedger(userId: string, limit = 200): Promise<LedgerEntry[]> {
+  const db = await getDb();
+  const rs = await db.execute({
+    sql: "SELECT * FROM ledger WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+    args: [userId, limit],
+  });
+  return rs.rows.map((r) => ({
+    id: Number(r.id),
+    kind: r.kind as LedgerKind,
+    amount: Number(r.amount),
+    debtDelta: Number(r.debt_delta),
+    note: r.note == null ? "" : String(r.note),
+    createdAt: Number(r.created_at),
+  }));
+}
+
+// ---------------------------------------------------------------- settings
+
+const SETTING_KEYS = Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[];
+
+async function readSettings(q: { execute: Transaction["execute"] }): Promise<Settings> {
+  const rs = await q.execute("SELECT key, value FROM settings");
+  const settings = { ...DEFAULT_SETTINGS };
+  for (const r of rs.rows) {
+    const key = String(r.key) as keyof Settings;
+    const value = Number(r.value);
+    if (SETTING_KEYS.includes(key) && Number.isFinite(value)) settings[key] = value;
+  }
+  return settings;
+}
+
+export async function getSettings(): Promise<Settings> {
+  return readSettings(await getDb());
+}
+
+export async function saveSettings(settings: Settings): Promise<void> {
+  await writeTx(async (tx) => {
+    for (const key of SETTING_KEYS) {
+      await tx.execute({
+        sql: "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        args: [key, String(settings[key])],
+      });
+    }
+  });
 }
 
 function toOutcome(r: Row): Outcome {
@@ -60,15 +156,18 @@ export async function upsertUser(u: {
   displayName: string;
   avatarUrl: string | null;
 }): Promise<void> {
-  const db = await getDb();
-  await db.execute({
-    sql: `INSERT INTO users (id, username, display_name, avatar_url, balance)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT (id) DO UPDATE SET
-            username = excluded.username,
-            display_name = excluded.display_name,
-            avatar_url = excluded.avatar_url`,
-    args: [u.id, u.username, u.displayName, u.avatarUrl, STARTING_BALANCE],
+  await writeTx(async (tx) => {
+    await tx.execute({
+      sql: `INSERT INTO users (id, username, display_name, avatar_url, balance)
+            VALUES (?, ?, ?, ?, 0)
+            ON CONFLICT (id) DO UPDATE SET
+              username = excluded.username,
+              display_name = excluded.display_name,
+              avatar_url = excluded.avatar_url`,
+      args: [u.id, u.username, u.displayName, u.avatarUrl],
+    });
+    const seen = await tx.execute({ sql: "SELECT 1 FROM ledger WHERE user_id = ? LIMIT 1", args: [u.id] });
+    if (seen.rows.length === 0) await post(tx, { userId: u.id, kind: "signup", amount: STARTING_BALANCE });
   });
 }
 
@@ -98,7 +197,7 @@ export async function setNickname(userId: string, nickname: string): Promise<voi
 export async function getLeaderboard(): Promise<LeaderboardRow[]> {
   const db = await getDb();
   const rs = await db.execute(
-    `SELECT u.id, u.nickname, u.avatar_url, u.balance, u.created_at,
+    `SELECT u.id, u.nickname, u.avatar_url, u.balance, u.debt, u.borrowed, u.created_at,
             COALESCE(SUM(CASE WHEN b.status = 'pending' THEN b.stake END), 0) AS in_play,
             COALESCE(SUM(b.status = 'won'), 0) AS wins,
             COALESCE(SUM(b.status = 'lost'), 0) AS losses
@@ -113,11 +212,13 @@ export async function getLeaderboard(): Promise<LeaderboardRow[]> {
       avatarUrl: r.avatar_url == null ? null : String(r.avatar_url),
       balance: Number(r.balance),
       inPlay: Number(r.in_play),
+      debt: Number(r.debt),
+      borrowed: Number(r.borrowed),
       wins: Number(r.wins),
       losses: Number(r.losses),
       createdAt: Number(r.created_at),
     }))
-    .sort((x, y) => y.balance + y.inPlay - (x.balance + x.inPlay) || x.createdAt - y.createdAt);
+    .sort((x, y) => y.balance + y.inPlay - y.debt - (x.balance + x.inPlay - x.debt) || x.createdAt - y.createdAt);
 }
 
 // ---------------------------------------------------------------- matches
@@ -173,6 +274,8 @@ export async function listMatches(archived: boolean): Promise<Match[]> {
     archived: Number(r.archived) === 1,
     mapNames: parseMapNames(r.map_names),
     scrapedAt: r.scraped_at == null ? null : Math.floor(Number(r.scraped_at) / 1000),
+    stipendPaidAt: r.stipend_paid_at == null ? null : Number(r.stipend_paid_at),
+    finalizedAt: r.finalized_at == null ? null : Number(r.finalized_at),
     markets: marketsByMatch.get(Number(r.id)) ?? [],
   }));
 }
@@ -243,6 +346,143 @@ export async function setMatchArchived(id: number, archived: boolean): Promise<v
   await db.execute({
     sql: "UPDATE matches SET archived = ? WHERE id = ?",
     args: [archived ? 1 : 0, id],
+  });
+}
+
+/**
+ * Close the books on a match: leftover markets nobody bet on are voided,
+ * players who took the stipend but never bet on the match (bets that were
+ * refunded don't count) hand it back, and everyone's debt grows by the
+ * per-match interest. Undoable with `unfinalizeMatch`.
+ */
+export async function finalizeMatch(id: number): Promise<void> {
+  await writeTx(async (tx) => {
+    const match = await tx.execute({ sql: "SELECT finalized_at FROM matches WHERE id = ?", args: [id] });
+    if (!match.rows[0]) throw new UserError("Match not found.");
+    if (match.rows[0].finalized_at != null) throw new UserError("This match is already finalized.");
+    const open = await tx.execute({
+      sql: `SELECT COUNT(*) AS n FROM markets_v2 m WHERE match_id = ? AND (status = 'open'
+              OR EXISTS (SELECT 1 FROM bets_v2 WHERE market_id = m.id AND status = 'pending'))`,
+      args: [id],
+    });
+    if (Number(open.rows[0].n) > 0) {
+      throw new UserError("Close and pay out (or void) every market with bets on it first.");
+    }
+    // Draft or closed markets with no bets, e.g. a map 3 that wasn't played.
+    await tx.execute({
+      sql: `UPDATE markets_v2 SET status = 'void', result = NULL, auto_settled = 0
+            WHERE match_id = ? AND status IN ('draft','closed')`,
+      args: [id],
+    });
+
+    await postMany(tx, "clawback", { type: "match", id }, {
+      sql: `SELECT user_id, -SUM(amount) AS amount FROM ledger
+            WHERE ref_type = 'match' AND ref_id = ? AND kind IN ('stipend','clawback','clawback_reversal')
+              AND user_id NOT IN (
+                SELECT b.user_id FROM bets_v2 b JOIN markets_v2 m ON m.id = b.market_id
+                WHERE m.match_id = ? AND b.status IN ('won','lost'))
+            GROUP BY user_id HAVING SUM(amount) > 0`,
+      args: [id, id],
+    });
+
+    const { loanInterestPct } = await readSettings(tx);
+    const debtors = await tx.execute("SELECT id, debt FROM users WHERE debt > 0");
+    for (const u of debtors.rows) {
+      const interest = roundUp((Number(u.debt) * loanInterestPct) / 100);
+      await post(tx, { userId: String(u.id), kind: "interest", amount: 0, debt: interest, ref: { type: "match", id } });
+    }
+    await tx.execute({ sql: "UPDATE matches SET finalized_at = unixepoch() WHERE id = ?", args: [id] });
+  });
+}
+
+/** Reverse a finalization: claw-backs are returned and the interest it charged is removed. Voided markets stay void. */
+export async function unfinalizeMatch(id: number): Promise<void> {
+  await writeTx(async (tx) => {
+    const match = await tx.execute({ sql: "SELECT finalized_at FROM matches WHERE id = ?", args: [id] });
+    if (match.rows[0]?.finalized_at == null) throw new UserError("This match isn't finalized.");
+    // Whatever is still clawed back for this match goes back.
+    await postMany(tx, "clawback_reversal", { type: "match", id }, {
+      sql: `SELECT user_id, -SUM(amount) AS amount FROM ledger
+            WHERE ref_type = 'match' AND ref_id = ? AND kind IN ('clawback','clawback_reversal')
+            GROUP BY user_id HAVING SUM(amount) < 0`,
+      args: [id],
+    });
+    const interest = await tx.execute({
+      sql: `SELECT user_id, SUM(debt_delta) AS charged FROM ledger
+            WHERE ref_type = 'match' AND ref_id = ? AND kind = 'interest'
+            GROUP BY user_id HAVING SUM(debt_delta) > 0`,
+      args: [id],
+    });
+    for (const r of interest.rows) {
+      await post(tx, { userId: String(r.user_id), kind: "interest", amount: 0, debt: -Number(r.charged), ref: { type: "match", id }, note: "Finalization undone" });
+    }
+    await tx.execute({ sql: "UPDATE matches SET finalized_at = NULL WHERE id = ?", args: [id] });
+  });
+}
+
+// ---------------------------------------------------------------- loans
+
+export interface LoanOffer {
+  /** Whether the player may borrow right now. */
+  eligible: boolean;
+  /** The most they can borrow, so that what they'd owe stays under the cap. */
+  max: number;
+  minBalance: number;
+  maxDebt: number;
+  interestPct: number;
+  garnishPct: number;
+}
+
+function loanOffer(user: User, s: Settings): LoanOffer {
+  const max = Math.max(0, Math.floor(((s.loanMaxDebt - user.debt) * 100) / (100 + s.loanInterestPct)));
+  return {
+    eligible: user.balance < s.loanMinBalance && max > 0,
+    max,
+    minBalance: s.loanMinBalance,
+    maxDebt: s.loanMaxDebt,
+    interestPct: s.loanInterestPct,
+    garnishPct: s.garnishPct,
+  };
+}
+
+export async function getLoanOffer(user: User): Promise<LoanOffer> {
+  return loanOffer(user, await getSettings());
+}
+
+/** Hand over `amount` credits; the player owes it back plus interest, rounded up. */
+export async function takeLoan(userId: string, amount: number): Promise<{ owed: number }> {
+  if (!Number.isInteger(amount) || amount < 1) throw new UserError("Enter an amount.");
+  return writeTx(async (tx) => {
+    const rs = await tx.execute({ sql: "SELECT * FROM users WHERE id = ?", args: [userId] });
+    if (!rs.rows[0]) throw new UserError("Account not found.");
+    const user = toUser(rs.rows[0]);
+    const offer = loanOffer(user, await readSettings(tx));
+    if (user.balance >= offer.minBalance) {
+      throw new UserError(`Loans are for players with under ${offer.minBalance.toLocaleString("en-US")} credits.`);
+    }
+    if (amount > offer.max) {
+      throw new UserError(
+        offer.max > 0
+          ? `You can borrow at most ${offer.max.toLocaleString("en-US")} right now.`
+          : `You already owe the maximum. Pay some back first.`,
+      );
+    }
+    const owed = amount + roundUp((amount * offer.interestPct) / 100);
+    await post(tx, { userId, kind: "loan", amount, debt: owed, note: `${offer.interestPct}% interest added up front` });
+    return { owed };
+  });
+}
+
+/** Pay back some or all of what's owed. */
+export async function repayLoan(userId: string, amount: number): Promise<void> {
+  if (!Number.isInteger(amount) || amount < 1) throw new UserError("Enter an amount.");
+  await writeTx(async (tx) => {
+    const rs = await tx.execute({ sql: "SELECT balance, debt FROM users WHERE id = ?", args: [userId] });
+    const [balance, debt] = [Number(rs.rows[0]?.balance), Number(rs.rows[0]?.debt)];
+    if (!(debt > 0)) throw new UserError("You don't owe anything.");
+    if (amount > debt) throw new UserError(`You only owe ${debt.toLocaleString("en-US")}.`);
+    if (amount > balance) throw new UserError("You don't have enough credits.");
+    await post(tx, { userId, kind: "repayment", amount: -amount, debt: -amount });
   });
 }
 
@@ -335,26 +575,54 @@ export async function saveOdds(
   });
 }
 
+/**
+ * The first time betting opens on a match, every player registered at that
+ * moment gets the stipend. Players who then don't bet on the match lose it
+ * again when the match is finalized.
+ */
+async function payStipend(tx: Transaction, matchId: number): Promise<void> {
+  const match = await tx.execute({
+    sql: "SELECT stipend_paid_at, finalized_at FROM matches WHERE id = ?",
+    args: [matchId],
+  });
+  if (match.rows[0]?.stipend_paid_at != null || match.rows[0]?.finalized_at != null) return;
+  const { stipend } = await readSettings(tx);
+  await tx.execute({
+    sql: "UPDATE matches SET stipend_paid_at = unixepoch() WHERE id = ?",
+    args: [matchId],
+  });
+  if (stipend <= 0) return;
+  await postMany(tx, "stipend", { type: "match", id: matchId }, {
+    sql: "SELECT id AS user_id, ? AS amount FROM users",
+    args: [stipend],
+  });
+}
+
 /** Open or close one market. Opening requires provided odds. */
 export async function setMarketOpen(marketId: number, open: boolean): Promise<void> {
-  const db = await getDb();
-  const rs = open
-    ? await db.execute({
-        sql: `UPDATE markets_v2 SET status = 'open'
-              WHERE id = ? AND status IN ('draft','closed') AND ${HAS_ALL_ODDS}`,
-        args: [marketId],
-      })
-    : await db.execute({
-        sql: "UPDATE markets_v2 SET status = 'closed' WHERE id = ? AND status = 'open'",
-        args: [marketId],
-      });
-  if (rs.rowsAffected === 0) {
-    throw new UserError(
-      open
-        ? "Can't open: the market needs odds for every outcome and must be in draft or closed."
-        : "That market isn't open.",
-    );
-  }
+  await writeTx(async (tx) => {
+    const rs = open
+      ? await tx.execute({
+          sql: `UPDATE markets_v2 SET status = 'open'
+                WHERE id = ? AND status IN ('draft','closed') AND ${HAS_ALL_ODDS}`,
+          args: [marketId],
+        })
+      : await tx.execute({
+          sql: "UPDATE markets_v2 SET status = 'closed' WHERE id = ? AND status = 'open'",
+          args: [marketId],
+        });
+    if (rs.rowsAffected === 0) {
+      throw new UserError(
+        open
+          ? "Can't open: the market needs odds for every outcome and must be in draft or closed."
+          : "That market isn't open.",
+      );
+    }
+    if (open) {
+      const m = await tx.execute({ sql: "SELECT match_id FROM markets_v2 WHERE id = ?", args: [marketId] });
+      await payStipend(tx, Number(m.rows[0].match_id));
+    }
+  });
 }
 
 /**
@@ -367,17 +635,19 @@ export async function bulkSetOpen(
   mapNumber: number | null,
   open: boolean,
 ): Promise<number> {
-  const db = await getDb();
-  const mapFilter = mapNumber == null ? "" : " AND map_number = ?";
-  const args = mapNumber == null ? [matchId] : [matchId, mapNumber];
-  const rs = await db.execute({
-    sql: open
-      ? `UPDATE markets_v2 SET status = 'open'
-         WHERE match_id = ? AND status = 'draft' AND ${HAS_ALL_ODDS}${mapFilter}`
-      : `UPDATE markets_v2 SET status = 'closed' WHERE match_id = ? AND status = 'open'${mapFilter}`,
-    args,
+  return writeTx(async (tx) => {
+    const mapFilter = mapNumber == null ? "" : " AND map_number = ?";
+    const args = mapNumber == null ? [matchId] : [matchId, mapNumber];
+    const rs = await tx.execute({
+      sql: open
+        ? `UPDATE markets_v2 SET status = 'open'
+           WHERE match_id = ? AND status = 'draft' AND ${HAS_ALL_ODDS}${mapFilter}`
+        : `UPDATE markets_v2 SET status = 'closed' WHERE match_id = ? AND status = 'open'${mapFilter}`,
+      args,
+    });
+    if (open && rs.rowsAffected > 0) await payStipend(tx, matchId);
+    return rs.rowsAffected;
   });
-  return rs.rowsAffected;
 }
 
 const UNSETTLED = ["draft", "open", "closed"];
@@ -396,22 +666,38 @@ async function settleInTx(tx: Transaction, marketId: number, result: string, aut
     throw new UserError("Only open or closed markets can be paid out.");
   }
   if (rs.rows[0].key == null) throw new UserError("That isn't one of this market's possible outcomes.");
-  await tx.execute({
-    sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
-          SELECT user_id, id,
-                 CASE WHEN pick = ? THEN 'won' ELSE 'lost' END,
-                 CASE WHEN pick = ? THEN payout ELSE -stake END
-          FROM bets_v2 WHERE market_id = ? AND status = 'pending'`,
-    args: [result, result, marketId],
+  const { garnishPct } = await readSettings(tx);
+  const bets = await tx.execute({
+    sql: `SELECT b.id, b.user_id, b.pick, b.stake, b.payout, u.debt FROM bets_v2 b
+          JOIN users u ON u.id = b.user_id
+          WHERE b.market_id = ? AND b.status = 'pending' ORDER BY b.id`,
+    args: [marketId],
   });
-  await tx.execute({
-    sql: `UPDATE users SET balance = balance + (
-            SELECT SUM(payout) FROM bets_v2
-            WHERE bets_v2.user_id = users.id AND market_id = ? AND pick = ? AND status = 'pending')
-          WHERE id IN (
-            SELECT user_id FROM bets_v2 WHERE market_id = ? AND pick = ? AND status = 'pending')`,
-    args: [marketId, result, marketId, result],
-  });
+  // Debt can be paid down by several wins in one market, so track it as we go.
+  const debts = new Map<string, number>();
+  for (const b of bets.rows) {
+    const userId = String(b.user_id);
+    const [stake, payout] = [Number(b.stake), Number(b.payout)];
+    if (b.pick !== result) {
+      await tx.execute({
+        sql: "INSERT INTO events_v2 (user_id, bet_id, kind, amount) VALUES (?, ?, 'lost', ?)",
+        args: [userId, b.id, -stake],
+      });
+      continue;
+    }
+    await post(tx, { userId, kind: "payout", amount: payout, ref: { type: "bet", id: Number(b.id) } });
+    // A share of the profit goes straight to the loan.
+    const debt = debts.get(userId) ?? Number(b.debt);
+    const garnish = Math.min(debt, roundUp(((payout - stake) * garnishPct) / 100));
+    if (garnish > 0) {
+      await post(tx, { userId, kind: "garnish", amount: -garnish, debt: -garnish, ref: { type: "bet", id: Number(b.id) } });
+      debts.set(userId, debt - garnish);
+    }
+    await tx.execute({
+      sql: "INSERT INTO events_v2 (user_id, bet_id, kind, amount, note) VALUES (?, ?, 'won', ?, ?)",
+      args: [userId, b.id, payout - garnish, garnish > 0 ? `${garnish.toLocaleString("en-US")} of it went to your loan.` : null],
+    });
+  }
   await tx.execute({
     sql: `UPDATE bets_v2 SET status = CASE WHEN pick = ? THEN 'won' ELSE 'lost' END
           WHERE market_id = ? AND status = 'pending'`,
@@ -437,22 +723,38 @@ async function unsettleInTx(tx: Transaction, marketId: number) {
   if (status !== "settled" && status !== "void") {
     throw new UserError("That market hasn't been paid out or voided.");
   }
-  const [betStatus, column] = status === "settled" ? ["won", "payout"] : ["refunded", "stake"];
   const live = `pick NOT IN (SELECT key FROM outcomes WHERE outcomes.market_id = bets_v2.market_id AND eliminated = 1)`;
-  await tx.execute({
-    sql: `INSERT INTO events_v2 (user_id, bet_id, kind, amount)
-          SELECT user_id, id, 'reversed',
-                 CASE status WHEN 'won' THEN -payout WHEN 'refunded' THEN -stake ELSE 0 END
-          FROM bets_v2 WHERE market_id = ? AND status != 'pending' AND ${live}`,
+  const bets = await tx.execute({
+    sql: `SELECT id, user_id, status, stake, payout FROM bets_v2
+          WHERE market_id = ? AND status != 'pending' AND ${live} ORDER BY id`,
     args: [marketId],
   });
-  await tx.execute({
-    sql: `UPDATE users SET balance = balance - (
-            SELECT SUM(${column}) FROM bets_v2
-            WHERE bets_v2.user_id = users.id AND market_id = ? AND status = ? AND ${live})
-          WHERE id IN (SELECT user_id FROM bets_v2 WHERE market_id = ? AND status = ? AND ${live})`,
-    args: [marketId, betStatus, marketId, betStatus],
-  });
+  for (const b of bets.rows) {
+    const userId = String(b.user_id);
+    const ref = { type: "bet" as const, id: Number(b.id) };
+    let amount = 0;
+    if (b.status === "won") {
+      amount = -Number(b.payout);
+      await post(tx, { userId, kind: "reversal", amount, ref });
+      // Give back whatever of this win went to the loan.
+      const g = await tx.execute({
+        sql: "SELECT COALESCE(SUM(amount), 0) AS taken FROM ledger WHERE ref_type = 'bet' AND ref_id = ? AND kind IN ('garnish','garnish_reversal')",
+        args: [b.id],
+      });
+      const taken = -Number(g.rows[0].taken);
+      if (taken > 0) {
+        await post(tx, { userId, kind: "garnish_reversal", amount: taken, debt: taken, ref });
+        amount += taken;
+      }
+    } else if (b.status === "refunded") {
+      amount = -Number(b.stake);
+      await post(tx, { userId, kind: "reversal", amount, ref });
+    }
+    await tx.execute({
+      sql: "INSERT INTO events_v2 (user_id, bet_id, kind, amount) VALUES (?, ?, 'reversed', ?)",
+      args: [userId, b.id, amount],
+    });
+  }
   await tx.execute({
     sql: `UPDATE bets_v2 SET status = 'pending' WHERE market_id = ? AND status != 'pending' AND ${live}`,
     args: [marketId],
@@ -592,13 +894,13 @@ export async function voidMarket(marketId: number): Promise<void> {
             FROM bets_v2 WHERE market_id = ? AND status = 'pending'`,
       args: [marketId],
     });
-    await tx.execute({
-      sql: `UPDATE users SET balance = balance + (
-              SELECT SUM(stake) FROM bets_v2
-              WHERE bets_v2.user_id = users.id AND market_id = ? AND status = 'pending')
-            WHERE id IN (SELECT user_id FROM bets_v2 WHERE market_id = ? AND status = 'pending')`,
-      args: [marketId, marketId],
+    const bets = await tx.execute({
+      sql: "SELECT id, user_id, stake FROM bets_v2 WHERE market_id = ? AND status = 'pending'",
+      args: [marketId],
     });
+    for (const b of bets.rows) {
+      await post(tx, { userId: String(b.user_id), kind: "refund", amount: Number(b.stake), ref: { type: "bet", id: Number(b.id) } });
+    }
     await tx.execute({
       sql: "UPDATE bets_v2 SET status = 'refunded' WHERE market_id = ? AND status = 'pending'",
       args: [marketId],
@@ -765,6 +1067,27 @@ export async function ingestScrape(scrape: ParsedScrape): Promise<IngestResult> 
 
 // ---------------------------------------------------------------- bets
 
+/** How much more a player may stake under the exposure cap: open stakes may be at most the cap share of bankroll. */
+async function stakeRoom(
+  q: { execute: Transaction["execute"] },
+  userId: string,
+  balance: number,
+): Promise<{ max: number; capPct: number; inPlay: number }> {
+  const { exposureCapPct } = await readSettings(q);
+  const rs = await q.execute({
+    sql: "SELECT COALESCE(SUM(stake), 0) AS in_play FROM bets_v2 WHERE user_id = ? AND status = 'pending'",
+    args: [userId],
+  });
+  const inPlay = Number(rs.rows[0].in_play);
+  const allowed = Math.floor(((balance + inPlay) * exposureCapPct) / 100) - inPlay;
+  return { max: Math.max(0, Math.min(balance, allowed)), capPct: exposureCapPct, inPlay };
+}
+
+/** The most the player can stake right now, for the bet slip. */
+export async function getStakeRoom(user: User): Promise<{ max: number; capPct: number; inPlay: number }> {
+  return stakeRoom(await getDb(), user.id, user.balance);
+}
+
 export async function placeBet(input: {
   userId: string;
   marketId: number;
@@ -789,6 +1112,14 @@ export async function placeBet(input: {
     const ur = await tx.execute({ sql: "SELECT balance FROM users WHERE id = ?", args: [userId] });
     if (!ur.rows[0]) throw new UserError("Account not found. Log in again.");
     if (stake > Number(ur.rows[0].balance)) throw new UserError("You don't have enough credits.");
+    const room = await stakeRoom(tx, userId, Number(ur.rows[0].balance));
+    if (stake > room.max) {
+      throw new UserError(
+        room.max > 0
+          ? `Exposure cap: at most ${room.capPct}% of your credits can be in play. You can bet up to ${room.max.toLocaleString("en-US")} more right now.`
+          : `Exposure cap: ${room.capPct}% of your credits are already in play. Wait for a bet to pay out.`,
+      );
+    }
 
     const outcomes = or.rows.map(toOutcome);
     if (outcomes.find((o) => o.key === pick)?.eliminated) {
@@ -796,22 +1127,22 @@ export async function placeBet(input: {
     }
     const q = quote(outcomes, pick, stake);
     if (!q) throw new UserError("Betting is closed on this market.");
+    if (!isBettable(q.odds)) {
+      throw new UserError(`Odds under ${MIN_ODDS.toFixed(2)} can't be bet on.`);
+    }
     if (q.odds < quotedOdds * (1 - SLIPPAGE_TOLERANCE)) {
       throw new UserError(`The odds moved to ${q.odds.toFixed(2)}. Check the new price and try again.`);
     }
 
     await tx.execute({
-      sql: "UPDATE users SET balance = balance - ? WHERE id = ?",
-      args: [stake, userId],
-    });
-    await tx.execute({
       sql: "UPDATE outcomes SET stake = stake + ? WHERE market_id = ? AND key = ?",
       args: [stake, marketId, pick],
     });
-    await tx.execute({
+    const bet = await tx.execute({
       sql: "INSERT INTO bets_v2 (user_id, market_id, pick, stake, odds, payout) VALUES (?, ?, ?, ?, ?, ?)",
       args: [userId, marketId, pick, stake, q.odds, q.payout],
     });
+    await post(tx, { userId, kind: "bet", amount: -stake, ref: { type: "bet", id: Number(bet.lastInsertRowid) } });
     return { odds: q.odds, payout: q.payout };
   });
 }
@@ -884,7 +1215,7 @@ export async function latestEventId(): Promise<number> {
 export async function listEventsAfter(userId: string, afterId: number): Promise<LiveEvent[]> {
   const db = await getDb();
   const rs = await db.execute({
-    sql: `SELECT e.id, e.kind, e.amount, b.pick, b.odds, m.map_number, m.kind AS market_kind,
+    sql: `SELECT e.id, e.kind, e.amount, e.note, b.pick, b.odds, m.map_number, m.kind AS market_kind,
                  x.team_a, x.team_b, x.map_names
           FROM events_v2 e
           JOIN bets_v2 b ON b.id = e.bet_id
@@ -898,6 +1229,7 @@ export async function listEventsAfter(userId: string, afterId: number): Promise<
     id: Number(r.id),
     kind: r.kind as LiveEventKind,
     amount: Number(r.amount),
+    note: r.note == null ? "" : String(r.note),
     label: outcomeLabel(String(r.pick), String(r.team_a), String(r.team_b)),
     mapNumber: Number(r.map_number),
     mapName: parseMapNames(r.map_names)[Number(r.map_number) - 1] ?? "",

@@ -74,6 +74,37 @@ backup.
    markets come back closed, so reopen them if betting should continue.
 7. **Archive** the match to take it off the home page.
 
+## House rules: exposure cap, stipends and loans
+
+Every credit movement is recorded in the `ledger` table (sign-up credits,
+stakes, payouts, refunds, corrections, loans, interest, garnishing, stipends
+and claw-backs), and a player's balance and debt are always the sum of their
+entries. Players see theirs under "Credit history" on the bets page. The
+numbers below are editable under **House rules** in admin; defaults in
+brackets.
+
+- **Exposure cap** (25%): a player's open stakes may be at most this share of
+  their bankroll (credits plus open stakes). The bet slip's "Max" is what they
+  can still stake.
+- **Minimum odds** (1.20, fixed in `src/lib/odds.ts`): outcomes priced shorter
+  than this are shown but can't be bet on.
+- **Stipend** (5,000): when betting first opens on a match, every player
+  registered at that moment gets it. Players who join later don't. When the
+  match is finalized, anyone who didn't bet on it (a bet that was refunded
+  doesn't count) hands it back, even if that takes them negative.
+- **Loans**: a player holding under 5,000 credits can borrow, as long as what
+  they'd owe stays within 20,000. Interest of 5% is added up front, rounded
+  up, so a fresh borrower can take at most 19,047. Another 5% is added to all
+  outstanding debt every time a match is finalized. 25% of each winning bet's
+  profit (rounded up) is taken towards the debt at payout, and returned if the
+  payout is undone. Players can also pay back any amount. The leaderboard ranks
+  by credits plus open stakes minus debt, and shows what each player owes and
+  everything they've ever borrowed.
+- **Finalize** (admin, per match, once every market with bets is paid out or
+  voided): voids leftover markets nobody bet on, claws back unused stipends
+  and charges the per-match interest. It can be undone, which returns the
+  claw-backs and removes that interest.
+
 ## Scraped odds (`POST /ingest`)
 
 Instead of typing odds in, a scraper can post them. The request must carry the

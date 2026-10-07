@@ -89,11 +89,12 @@ export function LiveEvents({ userId }: { userId: string }) {
       if (won.length) {
         const amount = sum(won);
         showBalanceDelta(amount);
+        const notes = won.map((e) => e.note).filter(Boolean);
         toast({
           tone: "win",
           title: won.length === 1 ? "You won" : `${won.length} bets won`,
           amount,
-          body: many(won, "bets paid out"),
+          body: `${many(won, "bets paid out")}${notes.length ? ` · ${notes.join(" ")}` : ""}`,
         });
         setMuted(readMuted());
         setLoss(null);

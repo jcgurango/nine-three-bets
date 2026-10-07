@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { getUser, isAdmin } from "@/lib/auth";
 import * as store from "@/lib/store";
-import type { Result } from "@/lib/types";
+import { DEFAULT_SETTINGS, type Result, type Settings } from "@/lib/types";
 
 async function run<T>(fn: () => Promise<T>): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
   try {
@@ -53,6 +53,24 @@ export async function placeBetAction(input: {
   });
 }
 
+export async function takeLoanAction(amount: number): Promise<Result<{ owed: number }>> {
+  return run(async () => {
+    const user = await getUser();
+    assert(user, "Log in first.");
+    assert(Number.isInteger(amount) && amount > 0, "Enter an amount.");
+    return store.takeLoan(user.id, amount);
+  });
+}
+
+export async function repayLoanAction(amount: number): Promise<Result> {
+  return run(async () => {
+    const user = await getUser();
+    assert(user, "Log in first.");
+    assert(Number.isInteger(amount) && amount > 0, "Enter an amount.");
+    await store.repayLoan(user.id, amount);
+  });
+}
+
 export async function setNicknameAction(nickname: string): Promise<Result> {
   return run(async () => {
     const user = await getUser();
@@ -87,6 +105,34 @@ export async function updateMatchAction(id: number, input: store.MatchInput): Pr
   return admin(async () => {
     assert(isId(id));
     await store.updateMatch(id, cleanMatchInput(input));
+  });
+}
+
+export async function saveSettingsAction(input: Settings): Promise<Result> {
+  return admin(async () => {
+    const settings = { ...DEFAULT_SETTINGS };
+    for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof Settings)[]) {
+      const value = Number(input?.[key]);
+      assert(Number.isInteger(value) && value >= 0 && value <= 1_000_000_000, `${key} must be a whole number.`);
+      settings[key] = value;
+    }
+    assert(settings.exposureCapPct >= 1 && settings.exposureCapPct <= 100, "Exposure cap is a percentage from 1 to 100.");
+    assert(settings.garnishPct <= 100, "Garnish is a percentage up to 100.");
+    await store.saveSettings(settings);
+  });
+}
+
+export async function finalizeMatchAction(id: number): Promise<Result> {
+  return admin(async () => {
+    assert(isId(id));
+    await store.finalizeMatch(id);
+  });
+}
+
+export async function unfinalizeMatchAction(id: number): Promise<Result> {
+  return admin(async () => {
+    assert(isId(id));
+    await store.unfinalizeMatch(id);
   });
 }
 

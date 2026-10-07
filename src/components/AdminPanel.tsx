@@ -5,6 +5,9 @@ import {
   bulkSetOpenAction,
   createMatchAction,
   deleteMatchAction,
+  finalizeMatchAction,
+  saveSettingsAction,
+  unfinalizeMatchAction,
   saveOddsAction,
   setMarketOpenAction,
   setMatchArchivedAction,
@@ -16,7 +19,7 @@ import {
 import { oddsText } from "@/lib/format";
 import { quote } from "@/lib/odds";
 import { outcomeLabel, outcomeSide } from "@/lib/outcomes";
-import { KIND_LABEL, type Market, type MarketStatus, type Match, type Result } from "@/lib/types";
+import { KIND_LABEL, type Market, type MarketStatus, type Match, type Result, type Settings } from "@/lib/types";
 import { Credits } from "./Credits";
 import { LocalTime } from "./LocalTime";
 
@@ -75,7 +78,15 @@ function ConfirmButton({
   );
 }
 
-export function AdminPanel({ active, archived }: { active: Match[]; archived: Match[] }) {
+export function AdminPanel({
+  active,
+  archived,
+  settings,
+}: {
+  active: Match[];
+  archived: Match[];
+  settings: Settings;
+}) {
   return (
     <div className="space-y-8">
       <section>
@@ -92,8 +103,14 @@ export function AdminPanel({ active, archived }: { active: Match[]; archived: Ma
             Click <b>Won</b> next to the result to pay out. Void refunds everyone (e.g. a map that
             isn&apos;t played).
           </li>
+          <li>
+            <b>Finalize</b> the match once everything is paid out: unused stipends are taken back and
+            loan interest is charged. Then archive it.
+          </li>
         </ol>
       </section>
+
+      <HouseRules settings={settings} />
 
       <section className="rounded-lg border border-line bg-panel p-4">
         <h2 className="mb-3 font-display text-lg font-bold uppercase tracking-wide">New match</h2>
@@ -118,6 +135,63 @@ export function AdminPanel({ active, archived }: { active: Match[]; archived: Ma
         </details>
       )}
     </div>
+  );
+}
+
+const RULES: { key: keyof Settings; label: string; hint: string; suffix: string }[] = [
+  { key: "exposureCapPct", label: "Exposure cap", hint: "Open stakes may be at most this share of a player's credits plus open stakes.", suffix: "%" },
+  { key: "stipend", label: "Stipend per match", hint: "Paid to every registered player when betting opens on a match. Taken back at finalization from anyone who didn't bet on it. 0 turns it off.", suffix: "credits" },
+  { key: "loanMinBalance", label: "Loans below", hint: "Players holding fewer credits than this can borrow.", suffix: "credits" },
+  { key: "loanMaxDebt", label: "Max owed", hint: "The most a player can owe at once, interest included.", suffix: "credits" },
+  { key: "loanInterestPct", label: "Interest", hint: "Added up front when a loan is taken, and again to all debt each time a match is finalized.", suffix: "%" },
+  { key: "garnishPct", label: "Garnish", hint: "Share of each winning bet's profit taken towards the loan.", suffix: "%" },
+];
+
+/** The tunable numbers behind the exposure cap, stipends and loans. */
+function HouseRules({ settings }: { settings: Settings }) {
+  const [draft, setDraft] = useState<Record<keyof Settings, string>>(() =>
+    Object.fromEntries(RULES.map((r) => [r.key, String(settings[r.key])])) as Record<keyof Settings, string>,
+  );
+  const { pending, error, run } = useRun();
+  const dirty = RULES.some((r) => Number(draft[r.key]) !== settings[r.key]);
+  return (
+    <section className="rounded-lg border border-line bg-panel p-4">
+      <h2 className="mb-3 font-display text-lg font-bold uppercase tracking-wide">House rules</h2>
+      <form
+        className="flex flex-wrap items-end gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          run(() =>
+            saveSettingsAction(
+              Object.fromEntries(RULES.map((r) => [r.key, Number(draft[r.key])])) as unknown as Settings,
+            ),
+          );
+        }}
+      >
+        {RULES.map((r) => (
+          <Field key={r.key} label={`${r.label} (${r.suffix})`}>
+            <input
+              type="number"
+              min="0"
+              step="1"
+              title={r.hint}
+              className={`${input} w-32 font-mono`}
+              value={draft[r.key]}
+              onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
+            />
+          </Field>
+        ))}
+        <button
+          type="submit"
+          disabled={pending || !dirty}
+          className="rounded bg-val px-4 py-1.5 text-sm font-bold text-ink disabled:opacity-40"
+        >
+          {dirty ? "Save rules" : "Saved"}
+        </button>
+        {error && <p className="w-full text-sm text-val">{error}</p>}
+      </form>
+      <p className="mt-2 text-xs text-mute">Hover a field for what it does. Changes apply to new bets and loans only.</p>
+    </section>
   );
 }
 
@@ -257,6 +331,16 @@ function AdminMatch({ match }: { match: Match }) {
               Scraped odds last received <LocalTime ts={match.scrapedAt} />
             </span>
           )}
+          {match.stipendPaidAt != null && (
+            <span className="text-xs text-mute">
+              Stipend paid <LocalTime ts={match.stipendPaidAt} />
+            </span>
+          )}
+          {match.finalizedAt != null && (
+            <span className="text-xs font-semibold text-gold">
+              Finalized <LocalTime ts={match.finalizedAt} />
+            </span>
+          )}
         </div>
         {editing ? (
           <MatchForm match={match} submitLabel="Save" onDone={() => setEditing(false)} />
@@ -271,6 +355,19 @@ function AdminMatch({ match }: { match: Match }) {
             <button className={btn} onClick={() => setEditing(true)}>
               Edit details
             </button>
+            {match.finalizedAt == null ? (
+              <ConfirmButton
+                disabled={pending}
+                className={`${btn} border-gold/60 text-gold`}
+                onConfirm={() => run(() => finalizeMatchAction(match.id))}
+              >
+                Finalize (claw back stipends, charge interest)
+              </ConfirmButton>
+            ) : (
+              <ConfirmButton disabled={pending} onConfirm={() => run(() => unfinalizeMatchAction(match.id))}>
+                Undo finalize
+              </ConfirmButton>
+            )}
             <button
               className={btn}
               disabled={pending}

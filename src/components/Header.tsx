@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { getUser, isAdmin } from "@/lib/auth";
 import { Balance } from "./Balance";
+import { Credits } from "./Credits";
 import { NicknameButton } from "./Nickname";
 
 export async function Header() {
@@ -23,6 +24,11 @@ export async function Header() {
                 My bets
               </Link>
               <Balance value={user.balance} />
+              {user.debt > 0 && (
+                <span className="text-xs font-semibold text-val" title="Outstanding loan">
+                  owes <Credits n={user.debt} />
+                </span>
+              )}
               {user.nickname && (
                 <NicknameButton nickname={user.nickname} avatarUrl={user.avatarUrl} />
               )}

@@ -3,7 +3,7 @@
 import { useState, useTransition } from "react";
 import { placeBetAction } from "@/app/actions";
 import { oddsText } from "@/lib/format";
-import { PROVIDED_WEIGHT, quote } from "@/lib/odds";
+import { MIN_ODDS, PROVIDED_WEIGHT, isBettable, quote } from "@/lib/odds";
 import { outcomeLabel, outcomeSide } from "@/lib/outcomes";
 import { KIND_LABEL, type BetView, type Market, type Match, type Side } from "@/lib/types";
 import { Credits } from "./Credits";
@@ -35,12 +35,17 @@ export function MatchCard({
   match,
   bets,
   balance,
+  maxStake,
+  capPct,
 }: {
   match: Match;
   /** The viewer's bets on this match. */
   bets: BetView[];
   /** Null when logged out. */
   balance: number | null;
+  /** The most the viewer may stake on one more bet under the exposure cap. */
+  maxStake: number;
+  capPct: number;
 }) {
   const [selection, setSelection] = useState<Selection | null>(null);
   const markets = match.markets.filter(
@@ -95,6 +100,8 @@ export function MatchCard({
                   market={market}
                   bets={bets.filter((b) => b.marketId === market.id)}
                   balance={balance}
+                  maxStake={maxStake}
+                  capPct={capPct}
                   pick={selection?.marketId === market.id ? selection.pick : null}
                   onPick={(pick) =>
                     setSelection(
@@ -117,6 +124,8 @@ function MarketRow({
   market,
   bets,
   balance,
+  maxStake,
+  capPct,
   pick,
   onPick,
 }: {
@@ -124,6 +133,8 @@ function MarketRow({
   market: Market;
   bets: BetView[];
   balance: number | null;
+  maxStake: number;
+  capPct: number;
   pick: string | null;
   onPick: (pick: string) => void;
 }) {
@@ -150,22 +161,27 @@ function MarketRow({
               const side = outcomeSide(key);
               const won = market.result === key;
               const lost = market.result != null && !won;
+              const odds = quote(market.outcomes, key)!.odds;
+              // Too short to be worth it: shown for information, but not for betting.
+              const tooShort = !isBettable(odds);
+              const bettable = open && !tooShort;
               return (
                 <button
                   key={key}
                   type="button"
-                  disabled={!open}
+                  disabled={!bettable}
                   aria-pressed={pick === key}
-                  aria-label={`${label(key)}, odds ${oddsText(quote(market.outcomes, key)!.odds)}`}
+                  aria-label={`${label(key)}, odds ${oddsText(odds)}${tooShort ? ", too short to bet on" : ""}`}
+                  title={tooShort ? `Odds under ${MIN_ODDS.toFixed(2)} can't be bet on` : undefined}
                   onClick={() => onPick(key)}
                   className={`flex items-center justify-between gap-2 rounded border px-3 py-2 text-left transition-colors ${
-                    pick === key && open
+                    pick === key && bettable
                       ? SIDE_SELECTED[side]
                       : won
                         ? "border-gold/70 bg-gold/10"
                         : "border-line bg-raised"
-                  } ${open ? "hover:border-bone/50" : ""} ${lost ? "opacity-40" : ""} ${
-                    !open && !won && !lost ? "opacity-60" : ""
+                  } ${bettable ? "hover:border-bone/50" : ""} ${lost ? "opacity-40" : ""} ${
+                    !bettable && !won && !lost ? "opacity-60" : ""
                   }`}
                 >
                   {isScore ? (
@@ -185,7 +201,12 @@ function MarketRow({
                     </span>
                   )}
                   <span className="font-mono text-base font-bold tabular-nums">
-                    {oddsText(quote(market.outcomes, key)!.odds)}
+                    {tooShort && open && (
+                      <span className="mr-2 font-sans text-[10px] font-semibold uppercase tracking-wide text-mute">
+                        too short
+                      </span>
+                    )}
+                    {oddsText(odds)}
                   </span>
                 </button>
               );
@@ -208,13 +229,15 @@ function MarketRow({
         </div>
       </div>
 
-      {open && pick && (
+      {open && pick && isBettable(quote(market.outcomes, pick)?.odds ?? 0) && (
         <BetSlip
           key={pick}
           market={market}
           pick={pick}
           label={label(pick)}
           balance={balance}
+          maxStake={maxStake}
+          capPct={capPct}
         />
       )}
 
@@ -245,6 +268,8 @@ function BetSlip({
   pick,
   label,
   balance,
+  maxStake,
+  capPct,
 }: {
   market: Market;
   /** Outcome key. */
@@ -252,6 +277,8 @@ function BetSlip({
   /** What the outcome is called, e.g. "Paper Rex" or "Paper Rex 2:1". */
   label: string;
   balance: number | null;
+  maxStake: number;
+  capPct: number;
 }) {
   const [stakeText, setStakeText] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -271,7 +298,7 @@ function BetSlip({
 
   const stake = Number(stakeText) || 0;
   const q = quote(market.outcomes, pick, stake);
-  const tooMuch = stake > balance;
+  const tooMuch = stake > maxStake;
   const setStake = (n: number) => {
     setStakeText(n > 0 ? String(Math.floor(n)) : "");
     setError(null);
@@ -319,7 +346,7 @@ function BetSlip({
           <button
             key={c}
             type="button"
-            onClick={() => setStake(Math.min(balance, stake + c))}
+            onClick={() => setStake(Math.min(maxStake, stake + c))}
             className="rounded bg-raised px-2 py-1.5 text-xs font-semibold text-mute hover:text-bone"
           >
             +{c / 1000}k
@@ -327,10 +354,11 @@ function BetSlip({
         ))}
         <button
           type="button"
-          onClick={() => setStake(balance)}
+          onClick={() => setStake(maxStake)}
           className="rounded bg-raised px-2 py-1.5 text-xs font-semibold text-mute hover:text-bone"
+          title={`The most you can stake right now (${capPct}% of your credits may be in play)`}
         >
-          All in
+          Max
         </button>
         <button
           type="submit"
@@ -352,7 +380,16 @@ function BetSlip({
           </span>
         ) : tooMuch ? (
           <span className="text-val">
-            You only have <Credits n={balance} />.
+            {maxStake < balance ? (
+              <>
+                Exposure cap: at most {capPct}% of your credits can be in play. You can stake up to{" "}
+                <Credits n={maxStake} /> right now.
+              </>
+            ) : (
+              <>
+                You only have <Credits n={balance} />.
+              </>
+            )}
           </span>
         ) : stake > 0 && q ? (
           <>

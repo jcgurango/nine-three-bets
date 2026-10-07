@@ -26,6 +26,62 @@ export interface User {
   nickname: string | null;
   avatarUrl: string | null;
   balance: number;
+  /** Outstanding loan, interest included. */
+  debt: number;
+  /** Everything ever borrowed, which never goes down. */
+  borrowed: number;
+}
+
+/** The house rules admins can tune. Percentages are whole numbers. */
+export interface Settings {
+  /** Open stakes may be at most this share of a player's bankroll (balance + open stakes). */
+  exposureCapPct: number;
+  /** Credits handed to every registered player when betting opens on a match. 0 disables it. */
+  stipend: number;
+  /** A player can borrow while their balance is below this. */
+  loanMinBalance: number;
+  /** The most a player can owe at once. */
+  loanMaxDebt: number;
+  /** Interest added to a loan the moment it's taken, and again to all debt each time a match is finalized. Rounded up. */
+  loanInterestPct: number;
+  /** Share of each win's profit taken for the loan, rounded up. */
+  garnishPct: number;
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  exposureCapPct: 25,
+  stipend: 5000,
+  loanMinBalance: 5000,
+  loanMaxDebt: 20000,
+  loanInterestPct: 5,
+  garnishPct: 25,
+};
+
+export type LedgerKind =
+  | "signup"
+  | "bet"
+  | "payout"
+  | "refund"
+  | "reversal"
+  | "loan"
+  | "repayment"
+  | "garnish"
+  | "garnish_reversal"
+  | "interest"
+  | "stipend"
+  | "clawback"
+  | "clawback_reversal"
+  | "adjustment";
+
+export interface LedgerEntry {
+  id: number;
+  kind: LedgerKind;
+  /** Change to the balance. */
+  amount: number;
+  /** Change to what the player owes. */
+  debtDelta: number;
+  note: string;
+  createdAt: number;
 }
 
 export type LiveEventKind = "won" | "lost" | "refunded" | "reversed";
@@ -34,8 +90,10 @@ export type LiveEventKind = "won" | "lost" | "refunded" | "reversed";
 export interface LiveEvent {
   id: number;
   kind: LiveEventKind;
-  /** Signed change to show next to the balance: +payout, -stake lost, +refund, -clawback. */
+  /** Signed change to show next to the balance: +payout (less any garnish), -stake lost, +refund, -clawback. */
   amount: number;
+  /** Extra wording, e.g. how much of a win went to a loan. */
+  note: string;
   /** What they bet on, e.g. "Paper Rex" or "Paper Rex 2:1". */
   label: string;
   mapNumber: number;
@@ -81,6 +139,10 @@ export interface Match {
   mapNames: string[];
   /** When odds for this match last arrived from the scraper (unix seconds), if ever. */
   scrapedAt: number | null;
+  /** When the stipend went out to players (unix seconds), if it has. */
+  stipendPaidAt: number | null;
+  /** When the books were closed on this match (unix seconds), if they have been. */
+  finalizedAt: number | null;
   markets: Market[];
 }
 
@@ -108,6 +170,8 @@ export interface LeaderboardRow {
   avatarUrl: string | null;
   balance: number;
   inPlay: number;
+  debt: number;
+  borrowed: number;
   wins: number;
   losses: number;
 }

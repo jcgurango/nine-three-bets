@@ -32,17 +32,34 @@ export function Leaderboard({ rows, meId }: { rows: LeaderboardRow[]; meId: stri
                 <span className="block text-xs text-mute">
                   {r.wins}W {r.losses}L
                   {r.inPlay > 0 && <> · <Credits n={r.inPlay} /> in play</>}
+                  {r.borrowed > 0 && (
+                    <span className="text-val">
+                      {" "}
+                      · borrowed <Credits n={r.borrowed} />
+                    </span>
+                  )}
+                  {r.debt > 0 && (
+                    <span className="text-val">
+                      {" "}
+                      · owes <Credits n={r.debt} />
+                    </span>
+                  )}
                 </span>
               </span>
-              <span className="font-mono text-sm font-semibold tabular-nums">
-                <Credits n={r.balance + r.inPlay} />
+              <span
+                className={`font-mono text-sm font-semibold tabular-nums ${
+                  r.balance + r.inPlay - r.debt < 0 ? "text-val" : ""
+                }`}
+              >
+                {r.balance + r.inPlay - r.debt < 0 && "\u2212"}
+                <Credits n={Math.abs(r.balance + r.inPlay - r.debt)} />
               </span>
             </li>
           ))}
         </ol>
       )}
       <p className="border-t border-line px-4 py-2 text-xs text-mute">
-        Ranked by credits, counting stakes on bets that haven&apos;t paid out yet.
+        Ranked by credits plus open stakes, minus anything owed on loans.
       </p>
     </section>
   );

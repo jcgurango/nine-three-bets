@@ -68,6 +68,23 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ledger (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  debt_delta INTEGER NOT NULL DEFAULT 0,
+  ref_type TEXT,
+  ref_id INTEGER,
+  note TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS ledger_user ON ledger(user_id, id);
+CREATE INDEX IF NOT EXISTS ledger_ref ON ledger(ref_type, ref_id);
 `;
 
 // Survive dev-server module reloads with a single client.
@@ -98,10 +115,19 @@ async function init(): Promise<Client> {
   // Correct scores ruled out by map results, and markets the site paid out by itself.
   await addColumn(client, "outcomes", "eliminated", "INTEGER NOT NULL DEFAULT 0");
   await addColumn(client, "markets_v2", "auto_settled", "INTEGER NOT NULL DEFAULT 0");
+  // Loans: what the player owes now, and everything they've ever borrowed.
+  await addColumn(client, "users", "debt", "INTEGER NOT NULL DEFAULT 0");
+  await addColumn(client, "users", "borrowed", "INTEGER NOT NULL DEFAULT 0");
+  // When the per-match stipend went out and when the match was finalized (unix seconds).
+  await addColumn(client, "matches", "stipend_paid_at", "INTEGER");
+  await addColumn(client, "matches", "finalized_at", "INTEGER");
+  // Extra wording on a result, e.g. how much of a win went to a loan.
+  await addColumn(client, "events_v2", "note", "TEXT");
   await client.execute(
     "CREATE UNIQUE INDEX IF NOT EXISTS matches_external_id ON matches(external_id)",
   );
   await migrateToV2(client);
+  await backfillLedger(client);
   return client;
 }
 
@@ -173,6 +199,53 @@ async function migrateToV2(client: Client): Promise<void> {
 
     await tx.execute(
       "INSERT INTO meta (key, value) VALUES ('schema_version', '2') ON CONFLICT (key) DO UPDATE SET value = '2'",
+    );
+    await tx.commit();
+  } catch (e) {
+    await tx.rollback().catch(() => {});
+    throw e;
+  } finally {
+    tx.close();
+  }
+}
+
+/**
+ * Version 3 introduced the ledger. Balances that existed before it get
+ * reconstructed entries (sign-up credits, stakes, payouts, refunds, dated by
+ * the bet) plus one adjustment per player if that doesn't add up to their
+ * balance, so every balance is explained by its ledger from here on.
+ */
+async function backfillLedger(client: Client): Promise<void> {
+  const tx = await client.transaction("write");
+  try {
+    const version = await tx.execute("SELECT value FROM meta WHERE key = 'schema_version'");
+    if (Number(version.rows[0]?.value ?? 1) >= 3) return;
+
+    await tx.execute(
+      `INSERT INTO ledger (user_id, kind, amount, created_at)
+       SELECT id, 'signup', ${STARTING_BALANCE}, created_at FROM users`,
+    );
+    await tx.execute(
+      `INSERT INTO ledger (user_id, kind, amount, ref_type, ref_id, created_at)
+       SELECT user_id, 'bet', -stake, 'bet', id, created_at FROM bets_v2`,
+    );
+    await tx.execute(
+      `INSERT INTO ledger (user_id, kind, amount, ref_type, ref_id, created_at)
+       SELECT user_id, 'payout', payout, 'bet', id, created_at FROM bets_v2 WHERE status = 'won'`,
+    );
+    await tx.execute(
+      `INSERT INTO ledger (user_id, kind, amount, ref_type, ref_id, created_at)
+       SELECT user_id, 'refund', stake, 'bet', id, created_at FROM bets_v2 WHERE status = 'refunded'`,
+    );
+    await tx.execute(
+      `INSERT INTO ledger (user_id, kind, amount, note, created_at)
+       SELECT u.id, 'adjustment', u.balance - COALESCE(l.total, 0), 'Balance before the ledger existed', unixepoch()
+       FROM users u LEFT JOIN (SELECT user_id, SUM(amount) AS total FROM ledger GROUP BY user_id) l
+         ON l.user_id = u.id
+       WHERE u.balance != COALESCE(l.total, 0)`,
+    );
+    await tx.execute(
+      "INSERT INTO meta (key, value) VALUES ('schema_version', '3') ON CONFLICT (key) DO UPDATE SET value = '3'",
     );
     await tx.commit();
   } catch (e) {

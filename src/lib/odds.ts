@@ -15,6 +15,10 @@ export const PROVIDED_WEIGHT = 1;
 export const POOL_SEED = 50_000;
 const MIN_PROB = 0.02;
 const MAX_PROB = 0.98;
+/** Outcomes priced shorter than this can't be bet on: too little to win, too much to lose. */
+export const MIN_ODDS = 1.2;
+
+export const isBettable = (odds: number) => odds >= MIN_ODDS;
 
 export interface Quote {
   /** Decimal odds, 2dp. */
