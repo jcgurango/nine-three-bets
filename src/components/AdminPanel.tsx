@@ -104,8 +104,8 @@ export function AdminPanel({
             isn&apos;t played).
           </li>
           <li>
-            <b>Finalize</b> the match once everything is paid out: unused stipends are taken back and
-            loan interest is charged. Then archive it.
+            <b>Finalize</b> the match once everything is paid out: stipend money that wasn&apos;t bet is
+            taken back and loan interest is charged. Then archive it.
           </li>
         </ol>
       </section>
@@ -140,7 +140,7 @@ export function AdminPanel({
 
 const RULES: { key: keyof Settings; label: string; hint: string; suffix: string }[] = [
   { key: "exposureCapPct", label: "Exposure cap", hint: "Open stakes may be at most this share of a player's credits plus open stakes.", suffix: "%" },
-  { key: "stipend", label: "Stipend per match", hint: "Paid to every registered player when betting opens on a match. Taken back at finalization from anyone who didn't bet on it. 0 turns it off.", suffix: "credits" },
+  { key: "stipend", label: "Stipend per match", hint: "Paid to every registered player when betting opens on a match. Bets placed after a stipend arrives count against it, oldest stipend first; at finalization whatever is uncovered is taken back. 0 turns it off.", suffix: "credits" },
   { key: "loanMinBalance", label: "Loans below", hint: "Players holding fewer credits than this can borrow.", suffix: "credits" },
   { key: "loanMaxDebt", label: "Max owed", hint: "The most a player can owe at once, interest included.", suffix: "credits" },
   { key: "loanInterestPct", label: "Interest", hint: "Added up front when a loan is taken, and again to all debt each time a match is finalized.", suffix: "%" },

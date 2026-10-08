@@ -89,9 +89,13 @@ brackets.
 - **Minimum odds** (1.20, fixed in `src/lib/odds.ts`): outcomes priced shorter
   than this are shown but can't be bet on.
 - **Stipend** (5,000): when betting first opens on a match, every player
-  registered at that moment gets it. Players who join later don't. When the
-  match is finalized, anyone who didn't bet on it (a bet that was refunded
-  doesn't count) hands it back, even if that takes them negative.
+  registered at that moment gets it. Players who join later don't. A stake
+  (won, lost or open; refunded bets don't count) covers stipends the player
+  had already received when they placed it, oldest first. When a match is
+  finalized, whatever its stipend is still uncovered is clawed back, even if
+  that takes the player negative. So two stipends can go on one match, a
+  player who bets 3,000 of 10,000 keeps exactly 3,000, and bets made before a
+  stipend arrived never excuse it.
 - **Loans**: a player holding under 5,000 credits can borrow, as long as what
   they'd owe stays within 20,000. Interest of 5% is added up front, rounded
   up, so a fresh borrower can take at most 19,047. Another 5% is added to all
@@ -101,8 +105,8 @@ brackets.
   by credits plus open stakes minus debt, and shows what each player owes and
   everything they've ever borrowed.
 - **Finalize** (admin, per match, once every market with bets is paid out or
-  voided): voids leftover markets nobody bet on, claws back unused stipends
-  and charges the per-match interest. It can be undone, which returns the
+  voided): voids leftover markets nobody bet on, claws back stipend money
+  that wasn't bet and charges the per-match interest. It can be undone, which returns the
   claw-backs and removes that interest.
 
 ## Scraped odds (`POST /ingest`)

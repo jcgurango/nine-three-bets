@@ -350,10 +350,45 @@ export async function setMatchArchived(id: number, archived: boolean): Promise<v
 }
 
 /**
+ * How much of each stipend a player hasn't bet, by match. Stakes (won, lost
+ * or open; refunds don't count) are handed out in time order to the stipends
+ * received before them, oldest first.
+ */
+async function stipendCoverage(tx: Transaction, userId: string): Promise<Map<number, number>> {
+  // Ledger row order is the exact order things happened in.
+  const stipends = (
+    await tx.execute({
+      sql: `SELECT id, ref_id, amount FROM ledger
+            WHERE user_id = ? AND kind = 'stipend' AND ref_type = 'match' ORDER BY id`,
+      args: [userId],
+    })
+  ).rows.map((r) => ({ matchId: Number(r.ref_id), left: Number(r.amount), at: Number(r.id) }));
+  const stakes = (
+    await tx.execute({
+      sql: `SELECT l.id, b.stake FROM ledger l JOIN bets_v2 b ON b.id = l.ref_id
+            WHERE l.user_id = ? AND l.kind = 'bet' AND l.ref_type = 'bet'
+              AND b.status IN ('won','lost','pending') ORDER BY l.id`,
+      args: [userId],
+    })
+  ).rows;
+  for (const s of stakes) {
+    let pool = Number(s.stake);
+    for (const st of stipends) {
+      if (pool <= 0) break;
+      if (st.at > Number(s.id) || st.left <= 0) continue;
+      const take = Math.min(pool, st.left);
+      st.left -= take;
+      pool -= take;
+    }
+  }
+  return new Map(stipends.map((st) => [st.matchId, st.left]));
+}
+
+/**
  * Close the books on a match: leftover markets nobody bet on are voided,
- * players who took the stipend but never bet on the match (bets that were
- * refunded don't count) hand it back, and everyone's debt grows by the
- * per-match interest. Undoable with `unfinalizeMatch`.
+ * players hand back whatever of this match's stipend they didn't bet (see
+ * `stipendCoverage`), and everyone's debt grows by the per-match interest.
+ * Undoable with `unfinalizeMatch`.
  */
 export async function finalizeMatch(id: number): Promise<void> {
   await writeTx(async (tx) => {
@@ -375,15 +410,26 @@ export async function finalizeMatch(id: number): Promise<void> {
       args: [id],
     });
 
-    await postMany(tx, "clawback", { type: "match", id }, {
-      sql: `SELECT user_id, -SUM(amount) AS amount FROM ledger
-            WHERE ref_type = 'match' AND ref_id = ? AND kind IN ('stipend','clawback','clawback_reversal')
-              AND user_id NOT IN (
-                SELECT b.user_id FROM bets_v2 b JOIN markets_v2 m ON m.id = b.market_id
-                WHERE m.match_id = ? AND b.status IN ('won','lost'))
-            GROUP BY user_id HAVING SUM(amount) > 0`,
-      args: [id, id],
+    // A stake can only cover stipends the player had already received when
+    // they placed it. Stipends are filled oldest-first from the stakes that
+    // came after them, and this match's claw-back is whatever its stipend is
+    // still short. So two stipends can be spent on one match, but bets made
+    // before a stipend arrived never excuse it.
+    const players = await tx.execute({
+      sql: "SELECT DISTINCT user_id FROM ledger WHERE kind = 'stipend' AND ref_type = 'match' AND ref_id = ?",
+      args: [id],
     });
+    for (const p of players.rows) {
+      const userId = String(p.user_id);
+      const shortfall = (await stipendCoverage(tx, userId)).get(id) ?? 0;
+      const taken = await tx.execute({
+        sql: `SELECT COALESCE(-SUM(amount), 0) AS taken FROM ledger
+              WHERE user_id = ? AND ref_type = 'match' AND ref_id = ? AND kind IN ('clawback','clawback_reversal')`,
+        args: [userId, id],
+      });
+      const amount = shortfall - Number(taken.rows[0].taken);
+      if (amount > 0) await post(tx, { userId, kind: "clawback", amount: -amount, ref: { type: "match", id } });
+    }
 
     const { loanInterestPct } = await readSettings(tx);
     const debtors = await tx.execute("SELECT id, debt FROM users WHERE debt > 0");
