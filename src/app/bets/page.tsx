@@ -44,7 +44,7 @@ const KIND_TEXT: Record<LedgerKind, string> = {
   garnish_reversal: "Loan deduction returned",
   interest: "Loan interest",
   stipend: "Match stipend",
-  clawback: "Stipend taken back (bets short of stipends)",
+  clawback: "Stipend taken back (not bet or repaid)",
   clawback_reversal: "Stipend returned",
   adjustment: "Adjustment",
 };

@@ -90,12 +90,13 @@ brackets.
   than this are shown but can't be bet on.
 - **Stipend** (5,000): when betting first opens on a match, every player
   registered at that moment gets it. Players who join later don't. A stake
-  (won, lost or open; refunded bets don't count) covers stipends the player
-  had already received when they placed it, oldest first. When a match is
-  finalized, whatever its stipend is still uncovered is clawed back, even if
-  that takes the player negative. So two stipends can go on one match, a
-  player who bets 3,000 of 10,000 keeps exactly 3,000, and bets made before a
-  stipend arrived never excuse it.
+  (won, lost or open; refunded bets don't count) or a loan repayment covers
+  stipends the player had already received when they made it, oldest first;
+  taking a new loan cancels repayment credit again, so only debt paid down for
+  good counts. When a match is finalized, whatever its stipend is still
+  uncovered is clawed back, even if that takes the player negative. So two
+  stipends can go on one match, a player who bets 3,000 of 10,000 keeps
+  exactly 3,000, and bets made before a stipend arrived never excuse it.
 - **Loans**: a player holding under 5,000 credits can borrow, as long as what
   they'd owe stays within 20,000. Interest of 5% is added up front, rounded
   up, so a fresh borrower can take at most 19,047. Another 5% is added to all

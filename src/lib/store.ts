@@ -350,9 +350,11 @@ export async function setMatchArchived(id: number, archived: boolean): Promise<v
 }
 
 /**
- * How much of each stipend a player hasn't bet, by match. Stakes (won, lost
- * or open; refunds don't count) are handed out in time order to the stipends
- * received before them, oldest first.
+ * How much of each stipend a player hasn't used, by match. Stakes (won, lost
+ * or open; refunds don't count) and loan repayments are handed out in time
+ * order to the stipends received before them, oldest first. Taking a new loan
+ * cancels repayment credit again (most recent first), so paying debt down for
+ * good counts, but repaying and re-borrowing nets to nothing.
  */
 async function stipendCoverage(tx: Transaction, userId: string): Promise<Map<number, number>> {
   // Ledger row order is the exact order things happened in.
@@ -363,22 +365,42 @@ async function stipendCoverage(tx: Transaction, userId: string): Promise<Map<num
       args: [userId],
     })
   ).rows.map((r) => ({ matchId: Number(r.ref_id), left: Number(r.amount), at: Number(r.id) }));
-  const stakes = (
+  const moves = (
     await tx.execute({
-      sql: `SELECT l.id, b.stake FROM ledger l JOIN bets_v2 b ON b.id = l.ref_id
-            WHERE l.user_id = ? AND l.kind = 'bet' AND l.ref_type = 'bet'
-              AND b.status IN ('won','lost','pending') ORDER BY l.id`,
+      sql: `SELECT l.id, l.kind, COALESCE(b.stake, ABS(l.amount)) AS amount FROM ledger l
+            LEFT JOIN bets_v2 b ON l.kind = 'bet' AND l.ref_type = 'bet' AND b.id = l.ref_id
+            WHERE l.user_id = ? AND (
+              (l.kind = 'bet' AND b.status IN ('won','lost','pending'))
+              OR l.kind IN ('repayment','loan'))
+            ORDER BY l.id`,
       args: [userId],
     })
   ).rows;
-  for (const s of stakes) {
-    let pool = Number(s.stake);
+
+  // Repayment credit, newest last, so a later loan can take it back.
+  const repaid: { stipend: (typeof stipends)[number]; amount: number }[] = [];
+  for (const mv of moves) {
+    const id = Number(mv.id);
+    if (mv.kind === "loan") {
+      let undo = Number(mv.amount);
+      while (undo > 0 && repaid.length) {
+        const last = repaid[repaid.length - 1];
+        const back = Math.min(undo, last.amount);
+        last.stipend.left += back;
+        last.amount -= back;
+        undo -= back;
+        if (last.amount === 0) repaid.pop();
+      }
+      continue;
+    }
+    let pool = Number(mv.amount);
     for (const st of stipends) {
       if (pool <= 0) break;
-      if (st.at > Number(s.id) || st.left <= 0) continue;
+      if (st.at > id || st.left <= 0) continue;
       const take = Math.min(pool, st.left);
       st.left -= take;
       pool -= take;
+      if (mv.kind === "repayment") repaid.push({ stipend: st, amount: take });
     }
   }
   return new Map(stipends.map((st) => [st.matchId, st.left]));
@@ -386,8 +408,9 @@ async function stipendCoverage(tx: Transaction, userId: string): Promise<Map<num
 
 /**
  * Close the books on a match: leftover markets nobody bet on are voided,
- * players hand back whatever of this match's stipend they didn't bet (see
- * `stipendCoverage`), and everyone's debt grows by the per-match interest.
+ * players hand back whatever of this match's stipend they neither bet nor
+ * used to pay down a loan (see `stipendCoverage`), and everyone's debt grows
+ * by the per-match interest.
  * Undoable with `unfinalizeMatch`.
  */
 export async function finalizeMatch(id: number): Promise<void> {

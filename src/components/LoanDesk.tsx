@@ -167,7 +167,8 @@ export function LoanDesk({
         *{offer.interestPct}% interest charged up front, and another {offer.interestPct}% on whatever you owe every
         time a match is finalized. {offer.garnishPct}% of every winning bet&apos;s profit is taken until you&apos;re
         paid up. You may owe at most <Credits n={offer.maxDebt} />. Loans available to players holding under{" "}
-        <Credits n={offer.minBalance} />. The house always collects.
+        <Credits n={offer.minBalance} />. Paying us back counts as spending your stipend, if that&apos;s your thing.
+        The house always collects.
       </p>
     </section>
   );
