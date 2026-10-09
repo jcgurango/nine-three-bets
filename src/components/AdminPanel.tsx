@@ -19,6 +19,7 @@ import {
 import { oddsText } from "@/lib/format";
 import { quote } from "@/lib/odds";
 import { outcomeLabel, outcomeSide } from "@/lib/outcomes";
+import { nextQuickStep, seriesState } from "@/lib/workflow";
 import { KIND_LABEL, type Market, type MarketStatus, type Match, type Result, type Settings } from "@/lib/types";
 import { Credits } from "./Credits";
 import { LocalTime } from "./LocalTime";
@@ -383,6 +384,7 @@ function AdminMatch({ match }: { match: Match }) {
         )}
         {error && <p className="text-sm text-val">{error}</p>}
       </header>
+      <QuickActions match={match} />
       {groups.map((n) => (
         <AdminGroup
           key={n}
@@ -392,6 +394,71 @@ function AdminMatch({ match }: { match: Match }) {
         />
       ))}
     </section>
+  );
+}
+
+/**
+ * The next step of running the match, as one or two big buttons. Follows the
+ * order of play and skips anything already handled in the full controls below.
+ */
+function QuickActions({ match }: { match: Match }) {
+  const { pending, error, run } = useRun();
+  const step = nextQuickStep(match);
+  if (!step) return null;
+  const { wins } = seriesState(match);
+  const big = "rounded px-4 py-2 font-display text-lg font-bold uppercase tracking-wide disabled:opacity-40";
+
+  const openMaps = (maps: number[]) =>
+    run(async () => {
+      for (const n of maps) {
+        const res = await bulkSetOpenAction(match.id, n, true);
+        if (!res.ok) return res;
+      }
+      return { ok: true };
+    });
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-b border-gold/40 bg-gold/5 px-4 py-3">
+      <span className="text-xs font-semibold uppercase tracking-widest text-gold">Next up</span>
+      <span className="font-mono text-sm tabular-nums text-mute" title="Maps won so far">
+        {wins.a}–{wins.b}
+      </span>
+      {step.type === "open" && (
+        <button className={`${big} bg-gold text-ink`} disabled={pending} onClick={() => openMaps(step.maps)}>
+          Open {step.maps.length === 1 ? `map ${step.maps[0]}` : `maps ${step.maps.join(", ")}`}
+        </button>
+      )}
+      {step.type === "close" && (
+        <>
+          <span className="text-sm">{step.label}</span>
+          <button
+            className={`${big} bg-gold text-ink`}
+            disabled={pending}
+            onClick={() => run(() => setMarketOpenAction(step.market.id, false))}
+          >
+            Close
+          </button>
+        </>
+      )}
+      {step.type === "settle" && (
+        <>
+          <span className="text-sm">{step.label} · who won?</span>
+          {step.market.outcomes
+            .filter((o) => !o.eliminated)
+            .map((o) => (
+              <ConfirmButton
+                key={o.key}
+                disabled={pending}
+                className={`${big} ${outcomeSide(o.key) === "a" ? "bg-val" : "bg-teal"} text-ink`}
+                onConfirm={() => run(() => settleMarketAction(step.market.id, o.key))}
+              >
+                {outcomeLabel(o.key, match.teamA, match.teamB)}
+              </ConfirmButton>
+            ))}
+        </>
+      )}
+      {error && <p className="w-full text-sm text-val">{error}</p>}
+    </div>
   );
 }
 
