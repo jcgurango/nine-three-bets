@@ -408,11 +408,25 @@ function QuickActions({ match }: { match: Match }) {
   const { wins } = seriesState(match);
   const big = "rounded px-4 py-2 font-display text-lg font-bold uppercase tracking-wide disabled:opacity-40";
 
-  const openMaps = (maps: number[]) =>
+  const matchLevelDraft = match.markets.filter((m) => m.mapNumber === 0 && m.status === "draft");
+
+  const openMaps = (maps: number[], first: boolean) =>
     run(async () => {
       for (const n of maps) {
         const res = await bulkSetOpenAction(match.id, n, true);
         if (!res.ok) return res;
+      }
+      // The match winner and correct score open with the first maps. If one
+      // can't (no odds yet), the maps still open and the bar says which.
+      if (first && matchLevelDraft.length) {
+        const stuck = [];
+        for (const m of matchLevelDraft) {
+          const res = await setMarketOpenAction(m.id, true);
+          if (!res.ok) stuck.push(KIND_LABEL[m.kind].toLowerCase());
+        }
+        if (stuck.length) {
+          return { ok: false, error: `Maps opened, but the ${stuck.join(" and ")} couldn't open: enter odds for every outcome first.` };
+        }
       }
       return { ok: true };
     });
@@ -424,8 +438,9 @@ function QuickActions({ match }: { match: Match }) {
         {wins.a}–{wins.b}
       </span>
       {step.type === "open" && (
-        <button className={`${big} bg-gold text-ink`} disabled={pending} onClick={() => openMaps(step.maps)}>
+        <button className={`${big} bg-gold text-ink`} disabled={pending} onClick={() => openMaps(step.maps, step.first)}>
           Open {step.maps.length === 1 ? `map ${step.maps[0]}` : `maps ${step.maps.join(", ")}`}
+          {step.first && matchLevelDraft.length > 0 && ` + ${matchLevelDraft.map((m) => KIND_LABEL[m.kind].toLowerCase()).join(" & ")}`}
         </button>
       )}
       {step.type === "close" && (

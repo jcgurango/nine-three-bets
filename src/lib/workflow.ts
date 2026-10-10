@@ -3,13 +3,15 @@ import { KIND_LABEL, type Market, type MarketKind, type Match } from "./types";
 /**
  * The one thing an admin most likely needs to do next while a match is being
  * played, worked out from the markets' current states. Order of play:
- * open the first maps, then for each map close and settle the 1st pistol,
+ * open the first maps (plus the match-level markets), then for each map close
+ * and settle the 1st pistol,
  * the 2nd pistol and the map winner, opening the decider map when it's
  * reached. Anything already done, voided or never opened is skipped, so a
  * match handled partly by hand still gets a sensible next step.
  */
 export type QuickStep =
-  | { type: "open"; maps: number[] }
+  /** `first` is the start of the match: the match winner and correct score open along with the maps. */
+  | { type: "open"; maps: number[]; first: boolean }
   | { type: "close"; market: Market; label: string }
   | { type: "settle"; market: Market; label: string };
 
@@ -39,10 +41,10 @@ export function nextQuickStep(match: Match): QuickStep | null {
 
   // Nothing has been opened yet: open every map that is sure to be played.
   const firstMaps = Array.from({ length: toWin }, (_, i) => i + 1);
-  if (firstMaps.every(untouched)) return { type: "open", maps: firstMaps };
+  if (firstMaps.every(untouched)) return { type: "open", maps: firstMaps, first: true };
 
   for (let n = 1; n <= match.bestOf; n++) {
-    if (untouched(n)) return { type: "open", maps: [n] };
+    if (untouched(n)) return { type: "open", maps: [n], first: false };
     for (const kind of PLAY_ORDER) {
       const market = mapMarkets(n).find((m) => m.kind === kind);
       if (!market) continue;

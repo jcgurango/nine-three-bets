@@ -53,9 +53,9 @@ backup.
 
 While a match is on, the **Next up** bar at the top of it offers the one
 action that comes next in the order of play: open the first maps (two for a
-best of 3, three for a best of 5), then for each map close and settle the 1st
-pistol, the 2nd pistol and the map winner, opening the decider when it's
-reached. Anything already handled, voided or never opened in the full controls
+best of 3, three for a best of 5) along with the match winner and correct
+score, then for each map close and settle the 1st pistol, the 2nd pistol and
+the map winner, opening the decider when it's reached. Anything already handled, voided or never opened in the full controls
 below is skipped. The bar disappears once a team has won the series.
 
 
