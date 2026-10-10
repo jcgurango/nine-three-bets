@@ -104,7 +104,14 @@ brackets.
   good counts. When a match is finalized, whatever its stipend is still
   uncovered is clawed back, even if that takes the player negative. So two
   stipends can go on one match, a player who bets 3,000 of 10,000 keeps
-  exactly 3,000, and bets made before a stipend arrived never excuse it.
+  exactly 3,000, and bets made before a stipend arrived never excuse it. A
+  stipend that has been clawed back counts as spent, so it can't soak up
+  later stakes meant for the next match.
+- **Repossession**: a claw-back from a player with a loan pays the loan down
+  first; only what's left over past the debt is plain claw-back. The player's
+  credits drop by the same amount either way, but a 5,000 claw-back against a
+  6,000 debt leaves them owing 1,000, and the per-match interest is charged on
+  what remains after that.
 - **Loans**: a player holding under 5,000 credits can borrow, as long as what
   they'd owe stays within 20,000. Interest of 5% is added up front, rounded
   up, so a fresh borrower can take at most 19,047. Another 5% is added to all
@@ -115,8 +122,9 @@ brackets.
   everything they've ever borrowed.
 - **Finalize** (admin, per match, once every market with bets is paid out or
   voided): voids leftover markets nobody bet on, claws back stipend money
-  that wasn't bet and charges the per-match interest. It can be undone, which returns the
-  claw-backs and removes that interest.
+  that wasn't bet (paying down loans first) and charges the per-match
+  interest. It can be undone, which returns the claw-backs, restores any debt
+  they paid down and removes that interest.
 
 ## Scraped odds (`POST /ingest`)
 

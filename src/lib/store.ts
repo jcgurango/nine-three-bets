@@ -354,7 +354,8 @@ export async function setMatchArchived(id: number, archived: boolean): Promise<v
  * or open; refunds don't count) and loan repayments are handed out in time
  * order to the stipends received before them, oldest first. Taking a new loan
  * cancels repayment credit again (most recent first), so paying debt down for
- * good counts, but repaying and re-borrowing nets to nothing.
+ * good counts, but repaying and re-borrowing nets to nothing. A stipend that
+ * was clawed back counts as spent from that moment on.
  */
 async function stipendCoverage(tx: Transaction, userId: string): Promise<Map<number, number>> {
   // Ledger row order is the exact order things happened in.
@@ -367,11 +368,11 @@ async function stipendCoverage(tx: Transaction, userId: string): Promise<Map<num
   ).rows.map((r) => ({ matchId: Number(r.ref_id), left: Number(r.amount), at: Number(r.id) }));
   const moves = (
     await tx.execute({
-      sql: `SELECT l.id, l.kind, COALESCE(b.stake, ABS(l.amount)) AS amount FROM ledger l
+      sql: `SELECT l.id, l.kind, l.ref_id, COALESCE(b.stake, ABS(l.amount)) AS amount FROM ledger l
             LEFT JOIN bets_v2 b ON l.kind = 'bet' AND l.ref_type = 'bet' AND b.id = l.ref_id
             WHERE l.user_id = ? AND (
               (l.kind = 'bet' AND b.status IN ('won','lost','pending'))
-              OR l.kind IN ('repayment','loan'))
+              OR l.kind IN ('repayment','loan','clawback','clawback_reversal'))
             ORDER BY l.id`,
       args: [userId],
     })
@@ -381,6 +382,12 @@ async function stipendCoverage(tx: Transaction, userId: string): Promise<Map<num
   const repaid: { stipend: (typeof stipends)[number]; amount: number }[] = [];
   for (const mv of moves) {
     const id = Number(mv.id);
+    // A stipend that was taken back is spent: nothing after that can cover it (unless it's returned).
+    if (mv.kind === "clawback" || mv.kind === "clawback_reversal") {
+      const st = stipends.find((s) => s.matchId === Number(mv.ref_id));
+      if (st) st.left += mv.kind === "clawback" ? -Number(mv.amount) : Number(mv.amount);
+      continue;
+    }
     if (mv.kind === "loan") {
       let undo = Number(mv.amount);
       while (undo > 0 && repaid.length) {
@@ -409,8 +416,9 @@ async function stipendCoverage(tx: Transaction, userId: string): Promise<Map<num
 /**
  * Close the books on a match: leftover markets nobody bet on are voided,
  * players hand back whatever of this match's stipend they neither bet nor
- * used to pay down a loan (see `stipendCoverage`), and everyone's debt grows
- * by the per-match interest.
+ * used to pay down a loan (see `stipendCoverage`); what's taken back pays
+ * down their loan first, like a repossession, and then everyone's remaining
+ * debt grows by the per-match interest.
  * Undoable with `unfinalizeMatch`.
  */
 export async function finalizeMatch(id: number): Promise<void> {
@@ -444,14 +452,21 @@ export async function finalizeMatch(id: number): Promise<void> {
     });
     for (const p of players.rows) {
       const userId = String(p.user_id);
-      const shortfall = (await stipendCoverage(tx, userId)).get(id) ?? 0;
-      const taken = await tx.execute({
-        sql: `SELECT COALESCE(-SUM(amount), 0) AS taken FROM ledger
-              WHERE user_id = ? AND ref_type = 'match' AND ref_id = ? AND kind IN ('clawback','clawback_reversal')`,
-        args: [userId, id],
+      // Already net of any earlier claw-back on this match that wasn't undone.
+      const amount = (await stipendCoverage(tx, userId)).get(id) ?? 0;
+      if (amount <= 0) continue;
+      // Repossession: what's taken back goes against the player's loan first,
+      // before the interest below is charged on it.
+      const debt = Number((await tx.execute({ sql: "SELECT debt FROM users WHERE id = ?", args: [userId] })).rows[0].debt);
+      const repossessed = Math.min(amount, debt);
+      await post(tx, {
+        userId,
+        kind: "clawback",
+        amount: -amount,
+        debt: -repossessed,
+        ref: { type: "match", id },
+        note: repossessed > 0 ? `${repossessed.toLocaleString("en-US")} of it paid down your loan.` : undefined,
       });
-      const amount = shortfall - Number(taken.rows[0].taken);
-      if (amount > 0) await post(tx, { userId, kind: "clawback", amount: -amount, ref: { type: "match", id } });
     }
 
     const { loanInterestPct } = await readSettings(tx);
@@ -469,13 +484,16 @@ export async function unfinalizeMatch(id: number): Promise<void> {
   await writeTx(async (tx) => {
     const match = await tx.execute({ sql: "SELECT finalized_at FROM matches WHERE id = ?", args: [id] });
     if (match.rows[0]?.finalized_at == null) throw new UserError("This match isn't finalized.");
-    // Whatever is still clawed back for this match goes back.
-    await postMany(tx, "clawback_reversal", { type: "match", id }, {
-      sql: `SELECT user_id, -SUM(amount) AS amount FROM ledger
+    // Whatever is still clawed back for this match goes back, and any loan it paid down is owed again.
+    const clawed = await tx.execute({
+      sql: `SELECT user_id, -SUM(amount) AS amount, -SUM(debt_delta) AS repossessed FROM ledger
             WHERE ref_type = 'match' AND ref_id = ? AND kind IN ('clawback','clawback_reversal')
             GROUP BY user_id HAVING SUM(amount) < 0`,
       args: [id],
     });
+    for (const r of clawed.rows) {
+      await post(tx, { userId: String(r.user_id), kind: "clawback_reversal", amount: Number(r.amount), debt: Number(r.repossessed), ref: { type: "match", id } });
+    }
     const interest = await tx.execute({
       sql: `SELECT user_id, SUM(debt_delta) AS charged FROM ledger
             WHERE ref_type = 'match' AND ref_id = ? AND kind = 'interest'
