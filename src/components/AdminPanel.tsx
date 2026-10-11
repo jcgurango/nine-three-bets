@@ -3,6 +3,7 @@
 import { useEffect, useState, useTransition } from "react";
 import {
   bulkSetOpenAction,
+  closeBankAction,
   createMatchAction,
   deleteMatchAction,
   finalizeMatchAction,
@@ -20,7 +21,7 @@ import { oddsText } from "@/lib/format";
 import { quote } from "@/lib/odds";
 import { outcomeLabel, outcomeSide } from "@/lib/outcomes";
 import { nextQuickStep, seriesState } from "@/lib/workflow";
-import { KIND_LABEL, type Market, type MarketStatus, type Match, type Result, type Settings } from "@/lib/types";
+import { BAILOUT, BAILOUT_MIN_BETS, KIND_LABEL, type Market, type MarketStatus, type Match, type Result, type Settings } from "@/lib/types";
 import { Credits } from "./Credits";
 import { LocalTime } from "./LocalTime";
 
@@ -83,10 +84,12 @@ export function AdminPanel({
   active,
   archived,
   settings,
+  bankClosedAt,
 }: {
   active: Match[];
   archived: Match[];
   settings: Settings;
+  bankClosedAt: number | null;
 }) {
   return (
     <div className="space-y-8">
@@ -112,6 +115,7 @@ export function AdminPanel({
       </section>
 
       <HouseRules settings={settings} />
+      <Bank closedAt={bankClosedAt} />
 
       <section className="rounded-lg border border-line bg-panel p-4">
         <h2 className="mb-3 font-display text-lg font-bold uppercase tracking-wide">New match</h2>
@@ -192,6 +196,39 @@ function HouseRules({ settings }: { settings: Settings }) {
         {error && <p className="w-full text-sm text-val">{error}</p>}
       </form>
       <p className="mt-2 text-xs text-mute">Hover a field for what it does. Changes apply to new bets and loans only.</p>
+    </section>
+  );
+}
+
+/** The one-way door: shutting the bank refunds all interest, pays the bailout and ends lending. */
+function Bank({ closedAt }: { closedAt: number | null }) {
+  const { pending, error, run } = useRun();
+  return (
+    <section className="rounded-lg border border-line bg-panel p-4">
+      <h2 className="mb-2 font-display text-lg font-bold uppercase tracking-wide">Bank of 9-3</h2>
+      {closedAt != null ? (
+        <p className="text-sm text-mute">
+          Shut down <LocalTime ts={closedAt} />. Interest was refunded and the <Credits n={BAILOUT} /> bailout paid.
+          Loans are off and no more interest is charged; what players still owe is collected as before.
+        </p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-3">
+          <ConfirmButton
+            disabled={pending}
+            onConfirm={() => run(() => closeBankAction())}
+            className="rounded border border-val bg-val/10 px-3 py-1.5 text-sm font-bold text-val hover:bg-val/20 disabled:opacity-40"
+          >
+            {pending ? "Shutting down…" : "Shut down the bank"}
+          </ConfirmButton>
+          <p className="min-w-0 flex-1 text-xs text-mute">
+            Can&apos;t be undone. Gives everyone back every credit of interest ever charged (off their debt first,
+            the rest in cash), then pays <Credits n={BAILOUT} /> to each player with more than {BAILOUT_MIN_BETS} bets,
+            also against their debt first. Ends lending and interest for good; remaining debts stand and are still
+            garnished. Players see the news where the loan desk was.
+          </p>
+          {error && <p className="w-full text-sm text-val">{error}</p>}
+        </div>
+      )}
     </section>
   );
 }

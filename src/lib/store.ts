@@ -6,6 +6,8 @@ import { MIN_ODDS, isBettable, quote } from "./odds";
 import { TEAM_OUTCOMES, marketLabel, matchLevelMarkets, outcomeLabel } from "./outcomes";
 import { flipOdds, sameTeam, type ParsedScrape, type Skipped } from "./scrape";
 import {
+  BAILOUT,
+  BAILOUT_MIN_BETS,
   DEFAULT_SETTINGS,
   MAP_KINDS,
   type BetStatus,
@@ -117,6 +119,71 @@ async function readSettings(q: { execute: Transaction["execute"] }): Promise<Set
 
 export async function getSettings(): Promise<Settings> {
   return readSettings(await getDb());
+}
+
+/** Unix seconds the Bank of 9-3 was shut down, or null while it's still lending. */
+async function readBankClosedAt(q: { execute: Transaction["execute"] }): Promise<number | null> {
+  const rs = await q.execute("SELECT value FROM meta WHERE key = 'bank_closed_at'");
+  return rs.rows[0] ? Number(rs.rows[0].value) : null;
+}
+
+export async function getBankClosedAt(): Promise<number | null> {
+  return readBankClosedAt(await getDb());
+}
+
+/**
+ * Shut down the Bank of 9-3, once and for all: no more loans and no more
+ * interest. Every credit of interest ever charged (up front on loans and at
+ * each finalization) is given back, first by cutting it off what the player
+ * still owes and the rest in cash. Then every player with more than
+ * `BAILOUT_MIN_BETS` bets gets `BAILOUT` credits, applied to what they still
+ * owe first. Existing debts, net of interest, remain and are still collected.
+ */
+export async function closeBank(): Promise<{ players: number; interestRefunded: number; bailedOut: number }> {
+  return writeTx(async (tx) => {
+    if ((await readBankClosedAt(tx)) != null) throw new UserError("The bank is already shut down.");
+    const rows = (
+      await tx.execute(
+        `SELECT u.id, u.debt,
+                COALESCE((SELECT SUM(CASE kind WHEN 'interest' THEN debt_delta ELSE debt_delta - amount END)
+                          FROM ledger WHERE user_id = u.id AND kind IN ('interest','loan')), 0) AS interest,
+                (SELECT COUNT(*) FROM bets_v2 WHERE user_id = u.id) AS bets
+         FROM users u ORDER BY u.id`,
+      )
+    ).rows;
+    let interestRefunded = 0;
+    let bailedOut = 0;
+    for (const r of rows) {
+      const userId = String(r.id);
+      let debt = Number(r.debt);
+      const interest = Number(r.interest);
+      if (interest > 0) {
+        const offDebt = Math.min(interest, debt);
+        debt -= offDebt;
+        interestRefunded += interest;
+        await post(tx, {
+          userId,
+          kind: "interest_refund",
+          amount: interest - offDebt,
+          debt: -offDebt,
+          note: offDebt > 0 ? `${offDebt.toLocaleString("en-US")} of it came off your loan.` : undefined,
+        });
+      }
+      if (Number(r.bets) > BAILOUT_MIN_BETS) {
+        const offDebt = Math.min(BAILOUT, debt);
+        bailedOut++;
+        await post(tx, {
+          userId,
+          kind: "bailout",
+          amount: BAILOUT - offDebt,
+          debt: -offDebt,
+          note: offDebt > 0 ? `${offDebt.toLocaleString("en-US")} of it settled your loan.` : undefined,
+        });
+      }
+    }
+    await tx.execute("INSERT INTO meta (key, value) VALUES ('bank_closed_at', unixepoch())");
+    return { players: rows.length, interestRefunded, bailedOut };
+  });
 }
 
 export async function saveSettings(settings: Settings): Promise<void> {
@@ -469,8 +536,11 @@ export async function finalizeMatch(id: number): Promise<void> {
       });
     }
 
+    // No interest once the bank has been shut down.
     const { loanInterestPct } = await readSettings(tx);
-    const debtors = await tx.execute("SELECT id, debt FROM users WHERE debt > 0");
+    const debtors = (await readBankClosedAt(tx)) != null
+      ? { rows: [] }
+      : await tx.execute("SELECT id, debt FROM users WHERE debt > 0");
     for (const u of debtors.rows) {
       const interest = roundUp((Number(u.debt) * loanInterestPct) / 100);
       await post(tx, { userId: String(u.id), kind: "interest", amount: 0, debt: interest, ref: { type: "match", id } });
@@ -533,7 +603,11 @@ function loanOffer(user: User, s: Settings): LoanOffer {
 }
 
 export async function getLoanOffer(user: User): Promise<LoanOffer> {
-  return loanOffer(user, await getSettings());
+  const db = await getDb();
+  const offer = loanOffer(user, await readSettings(db));
+  // A shut-down bank still collects, but doesn't lend.
+  if ((await readBankClosedAt(db)) != null) offer.eligible = false;
+  return offer;
 }
 
 /** Hand over `amount` credits; the player owes it back plus interest, rounded up. */
@@ -543,6 +617,7 @@ export async function takeLoan(userId: string, amount: number): Promise<{ owed: 
     const rs = await tx.execute({ sql: "SELECT * FROM users WHERE id = ?", args: [userId] });
     if (!rs.rows[0]) throw new UserError("Account not found.");
     const user = toUser(rs.rows[0]);
+    if ((await readBankClosedAt(tx)) != null) throw new UserError("The Bank of 9-3 is no longer lending.");
     const offer = loanOffer(user, await readSettings(tx));
     if (user.balance >= offer.minBalance) {
       throw new UserError(`Loans are for players with under ${offer.minBalance.toLocaleString("en-US")} credits.`);

@@ -126,6 +126,27 @@ brackets.
   interest. It can be undone, which returns the claw-backs, restores any debt
   they paid down and removes that interest.
 
+### Shutting down the bank
+
+**Bank of 9-3 → Shut down the bank** in admin is a one-way door (it asks
+for a second click). In one transaction it:
+
+1. refunds every player every credit of interest ever charged (the up-front
+   slice of each loan plus the per-match interest), taking it off what they
+   still owe first and paying the rest in cash;
+2. pays 50,000 to every player with more than 5 bets, again against their
+   remaining debt first (`BAILOUT` and `BAILOUT_MIN_BETS` in
+   `src/lib/types.ts`);
+3. records `bank_closed_at` in `meta`.
+
+From then on nobody can borrow and finalizing a match charges no interest.
+Whatever a player still owes, now net of interest, stands: it's still
+garnished from wins and can still be paid back from the (collections-only)
+loan desk. The ledger shows the two movements as "Interest refunded" and
+"Bank of 9-3 bailout". Where the loan desk was, everyone sees the Gazette
+front page about the bank's troubles; closing it is remembered on that
+device.
+
 ## Scraped odds (`POST /ingest`)
 
 Instead of typing odds in, a scraper can post them. The request must carry the

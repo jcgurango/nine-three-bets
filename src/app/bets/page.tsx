@@ -46,6 +46,8 @@ const KIND_TEXT: Record<LedgerKind, string> = {
   stipend: "Match stipend",
   clawback: "Stipend taken back (not bet or repaid)",
   clawback_reversal: "Stipend returned",
+  interest_refund: "Interest refunded (bank shut down)",
+  bailout: "Bank of 9-3 bailout",
   adjustment: "Adjustment",
 };
 

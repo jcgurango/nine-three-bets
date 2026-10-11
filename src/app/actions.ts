@@ -129,6 +129,10 @@ export async function finalizeMatchAction(id: number): Promise<Result> {
   });
 }
 
+export async function closeBankAction(): Promise<Result> {
+  return admin(() => store.closeBank());
+}
+
 export async function unfinalizeMatchAction(id: number): Promise<Result> {
   return admin(async () => {
     assert(isId(id));

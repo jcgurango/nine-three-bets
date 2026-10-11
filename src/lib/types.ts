@@ -57,6 +57,10 @@ export const DEFAULT_SETTINGS: Settings = {
   garnishPct: 25,
 };
 
+/** Paid to every player with more than `BAILOUT_MIN_BETS` bets when the Bank of 9-3 is shut down. */
+export const BAILOUT = 50_000;
+export const BAILOUT_MIN_BETS = 5;
+
 export type LedgerKind =
   | "signup"
   | "bet"
@@ -71,6 +75,8 @@ export type LedgerKind =
   | "stipend"
   | "clawback"
   | "clawback_reversal"
+  | "interest_refund"
+  | "bailout"
   | "adjustment";
 
 export interface LedgerEntry {

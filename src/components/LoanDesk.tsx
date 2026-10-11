@@ -11,17 +11,20 @@ const digits = (s: string) => Number(s.replace(/\D/g, "").slice(0, 9)) || 0;
 /**
  * The back-alley lender. Offers a loan to anyone broke enough, and shows what
  * a borrower owes with a way to pay it down. The copy is meant to look shady.
+ * Once the bank is shut down (`closed`) it only collects.
  */
 export function LoanDesk({
   balance,
   debt,
   borrowed,
   offer,
+  closed = false,
 }: {
   balance: number;
   debt: number;
   borrowed: number;
   offer: LoanOffer;
+  closed?: boolean;
 }) {
   const [amount, setAmount] = useState(String(Math.min(offer.max, 5000)));
   const [repay, setRepay] = useState("");
@@ -50,10 +53,10 @@ export function LoanDesk({
   return (
     <section className="loan-desk rounded-lg border-2 border-dashed border-gold bg-[#1a1407] p-4 text-sm">
       <h2 className="font-display text-2xl font-bold uppercase leading-none tracking-wide text-gold">
-        <span className="loan-blink">💸</span> 9-3 Payday Loans
+        <span className="loan-blink">{closed ? "🚔" : "💸"}</span> 9-3 Payday Loans
       </h2>
       <p className="mt-1 text-xs font-semibold uppercase tracking-widest text-gold/80">
-        No credit check · No questions · Instant approval*
+        {closed ? "Under investigation · Collections still open*" : "No credit check · No questions · Instant approval*"}
       </p>
 
       {offer.eligible && (
@@ -164,11 +167,21 @@ export function LoanDesk({
         </p>
       )}
       <p className="mt-3 text-[10px] leading-snug text-gold/50">
-        *{offer.interestPct}% interest charged up front, and another {offer.interestPct}% on whatever you owe every
-        time a match is finalized. {offer.garnishPct}% of every winning bet&apos;s profit is taken until you&apos;re
-        paid up. You may owe at most <Credits n={offer.maxDebt} />. Loans available to players holding under{" "}
-        <Credits n={offer.minBalance} />. Paying us back counts as spending your stipend, if that&apos;s your thing.
-        The house always collects.
+        {closed ? (
+          <>
+            *The Bank of 9-3 is no longer lending and no longer charges interest. Interest already paid has been
+            refunded. What&apos;s left on your tab is still owed: {offer.garnishPct}% of every winning bet&apos;s
+            profit is taken until you&apos;re paid up. The house always collects.
+          </>
+        ) : (
+          <>
+            *{offer.interestPct}% interest charged up front, and another {offer.interestPct}% on whatever you owe
+            every time a match is finalized. {offer.garnishPct}% of every winning bet&apos;s profit is taken until
+            you&apos;re paid up. You may owe at most <Credits n={offer.maxDebt} />. Loans available to players
+            holding under <Credits n={offer.minBalance} />. Paying us back counts as spending your stipend, if
+            that&apos;s your thing. The house always collects.
+          </>
+        )}
       </p>
     </section>
   );

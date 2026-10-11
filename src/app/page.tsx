@@ -1,20 +1,22 @@
 import { AutoRefresh } from "@/components/AutoRefresh";
+import { BankNews } from "@/components/BankNews";
 import { LoginButton } from "@/components/Header";
 import { Leaderboard } from "@/components/Leaderboard";
 import { LoanDesk } from "@/components/LoanDesk";
 import { MatchCard } from "@/components/MatchCard";
 import { getUser } from "@/lib/auth";
-import { getLeaderboard, getLoanOffer, getStakeRoom, listMatches, listUserBets } from "@/lib/store";
+import { getBankClosedAt, getLeaderboard, getLoanOffer, getStakeRoom, listMatches, listUserBets } from "@/lib/store";
 
 export default async function Home({ searchParams }: PageProps<"/">) {
   const user = await getUser();
-  const [matches, leaderboard, bets, params, room, offer] = await Promise.all([
+  const [matches, leaderboard, bets, params, room, offer, bankClosedAt] = await Promise.all([
     listMatches(false),
     getLeaderboard(),
     user ? listUserBets(user.id) : [],
     searchParams,
     user ? getStakeRoom(user) : null,
     user ? getLoanOffer(user) : null,
+    getBankClosedAt(),
   ]);
 
   return (
@@ -60,8 +62,9 @@ export default async function Home({ searchParams }: PageProps<"/">) {
         ))}
       </div>
       <aside className="space-y-6">
+        {bankClosedAt != null && <BankNews />}
         {user && offer && (offer.eligible || user.debt > 0) && (
-          <LoanDesk balance={user.balance} debt={user.debt} borrowed={user.borrowed} offer={offer} />
+          <LoanDesk balance={user.balance} debt={user.debt} borrowed={user.borrowed} offer={offer} closed={bankClosedAt != null} />
         )}
         <Leaderboard rows={leaderboard} meId={user?.id ?? null} />
       </aside>
